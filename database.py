@@ -67,6 +67,9 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Database initialization failed: {e}")
 
+
+
+
     # --- Vocabulary (New) ---
     def get_all_vocabulary(self):
         """Fetches all user-defined vocabulary into a dictionary."""
@@ -139,6 +142,89 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Failed to save setting {key}: {e}")
 
+    # --- Favorites & Categories ---
+    def get_favorites(self, category_id=None):
+        """Returns list of (id, name, category_id). Optionally filtered by category."""
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                if category_id:
+                     c.execute("SELECT id, name, category_id FROM favorites WHERE category_id = ?", (category_id,))
+                else:
+                     c.execute("SELECT id, name, category_id FROM favorites")
+                return c.fetchall()
+        except Exception as e:
+            logging.error(f"Get favorites failed: {e}")
+            return []
+            
+    def get_categories(self):
+        """Returns dict {id: name} of all categories."""
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT id, name FROM categories")
+                return dict(c.fetchall())
+        except Exception:
+            return {}
+
+    def add_category(self, name):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
+                conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def update_favorite_category(self, item_id, category_id):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("UPDATE favorites SET category_id = ? WHERE id = ?", (category_id, item_id))
+                conn.commit()
+            return True
+        except Exception as e:
+            logging.error(f"Update category failed: {e}")
+            return False
+
+    def remove_favorite(self, item_id):
+        """Removes an item from favorites."""
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("DELETE FROM favorites WHERE id = ?", (item_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logging.error(f"Remove favorite failed: {e}")
+            return False
+
+    def is_favorite(self, item_id):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT 1 FROM favorites WHERE id = ?", (item_id,))
+                return c.fetchone() is not None
+        except Exception:
+            return False
+
+    def toggle_favorite(self, item_id, item_name):
+        """Toggles favorite status. Default category is 1 (Uncategorized or First one)."""
+        if self.is_favorite(item_id):
+            return self.remove_favorite(item_id)
+        else:
+            try:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    # Default to category_id 1
+                    c.execute("INSERT INTO favorites (id, name, category_id) VALUES (?, ?, 1)", (item_id, item_name))
+                    conn.commit()
+                return True
+            except Exception as e:
+                logging.error(f"Add favorite failed: {e}")
+                return False
+                
     # --- Servers ---
     def get_custom_servers(self):
         try:
@@ -177,19 +263,45 @@ class DatabaseManager:
         try:
             with self.get_connection() as conn:
                 c = conn.cursor()
-                if limit == 1:
-                    c.execute("SELECT id, name FROM item_cache WHERE name = ? LIMIT 1", (query,))
-                    result = c.fetchone()
-                    if not result:
-                        c.execute("SELECT id, name FROM item_cache WHERE name LIKE ? LIMIT 1", (f'%{query}%',))
-                        result = c.fetchone()
-                    return result
-                else:
-                    c.execute("SELECT id, name FROM item_cache WHERE name LIKE ? ORDER BY length(name) ASC LIMIT ?", (f'%{query}%', limit))
-                    return c.fetchall()
+                
+                # Base Query with Join
+                # We select from item_cache and join vocabulary to check alias
+                base_sql = """
+                    SELECT i.id, i.name 
+                    FROM item_cache i
+                    LEFT JOIN user_vocabulary v ON i.name = v.original_term
+                """
+                
+                # Normalize query to list
+                tokens = query if isinstance(query, list) else query.split()
+                
+                conditions = []
+                params = []
+                
+                # Build AND conditions for each token
+                # Each token must match EITHER the Name OR the Alias
+                for token in tokens:
+                    t = token.strip()
+                    if t:
+                        conditions.append("(i.name LIKE ? OR v.corrected_term LIKE ?)")
+                        params.extend([f'%{t}%', f'%{t}%'])
+                
+                if not conditions:
+                    return []
+                
+                where_clause = " WHERE " + " AND ".join(conditions)
+                
+                # Limit handling
+                limit_clause = f" ORDER BY length(i.name) ASC LIMIT {limit}"
+                
+                full_sql = base_sql + where_clause + limit_clause
+                
+                c.execute(full_sql, tuple(params))
+                return c.fetchall()
+                
         except Exception as e:
             logging.error(f"Local search failed: {e}")
-            return None if limit == 1 else []
+            return []
 
     def get_item_name_by_id(self, item_id):
         try:

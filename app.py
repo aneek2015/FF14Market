@@ -4,6 +4,7 @@ import webbrowser
 from datetime import datetime
 import logging
 import time 
+import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk, filedialog
 
 # Import new modules
@@ -75,6 +76,7 @@ class FF14MarketApp(ctk.CTk):
         
         # [New] Load user vocabulary
         self.vocabulary_map = self.db.get_all_vocabulary()
+        self.vocabulary_reverse_map = {v: k for k, v in self.vocabulary_map.items()} 
         logging.info(f"載入 {len(self.vocabulary_map)} 條自訂詞彙")
         
         # 啟動背景執行緒匯入 items_cache_tw.json
@@ -154,7 +156,7 @@ class FF14MarketApp(ctk.CTk):
         self.tabview.add("市場概況")
         self.tabview.add("製作計算") 
         self.tabview.add("歷史數據")
-        self.tabview.add("🔥 熱銷掃描")
+        self.tabview.add("⭐ 我的最愛掃描")
         
         # Setup Tabs
         self.setup_tab_overview()
@@ -385,16 +387,17 @@ class FF14MarketApp(ctk.CTk):
         self.open_web_button.grid(row=10, column=0, padx=20, pady=(0, 5))
 
         self.vocab_button = ctk.CTkButton(self.sidebar_frame, text="詞彙管理", command=self.open_vocabulary_window, fg_color="#3B8ED0", hover_color="#36719F")
-        self.vocab_button.grid(row=11, column=0, padx=20, pady=(5, 10))
+        self.vocab_button.grid(row=11, column=0, padx=20, pady=(5, 5))
 
         self.settings_button = ctk.CTkButton(self.sidebar_frame, text="⚙️ 參數設定", command=self.open_settings_window, fg_color="transparent", border_width=1, text_color="silver")
-        self.settings_button.grid(row=12, column=0, padx=20, pady=(10, 0), sticky="s")
+        self.settings_button.grid(row=13, column=0, padx=20, pady=(10, 0), sticky="s")
+
 
         self.help_button = ctk.CTkButton(self.sidebar_frame, text="使用說明 / Help", command=self.show_help_window, fg_color="transparent", border_width=1, text_color="silver")
-        self.help_button.grid(row=13, column=0, padx=20, pady=(5, 5), sticky="s")
+        self.help_button.grid(row=14, column=0, padx=20, pady=(5, 5), sticky="s")
 
         self.debug_button = ctk.CTkButton(self.sidebar_frame, text="🔧 Debug", command=self.open_debug_window, fg_color="#444", hover_color="#333", height=24)
-        self.debug_button.grid(row=14, column=0, padx=20, pady=(5, 20), sticky="s")
+        self.debug_button.grid(row=15, column=0, padx=20, pady=(5, 20), sticky="s")
 
 
 
@@ -473,6 +476,10 @@ class FF14MarketApp(ctk.CTk):
             for item in tree.get_children():
                 tree.delete(item)
             self.vocabulary_map = self.db.get_all_vocabulary()
+            
+            # [Fix] Update Reverse Map as well
+            self.vocabulary_reverse_map = {v: k for k, v in self.vocabulary_map.items()}
+            
             sorted_vocab = sorted(self.vocabulary_map.items())
             for orig, corr in sorted_vocab:
                 tree.insert("", "end", values=(orig, corr))
@@ -517,6 +524,133 @@ class FF14MarketApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="刪除選定", command=delete_selected, fg_color="gray").pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="新增/更新", command=add_or_update).pack(side="left", padx=5)
         refresh_tree()
+
+    def open_favorite_manager(self):
+        window = ctk.CTkToplevel(self)
+        window.title("我的最愛分類管理")
+        window.geometry("800x600")
+        window.attributes("-topmost", True)
+        
+        # Data Loading
+        cats = self.db.get_categories() # {id: name}
+        # Invert for name lookup
+        cat_name_map = {v: k for k, v in cats.items()}
+        cat_names = list(cats.values())
+        
+        # Layout: Left (Categories), Right (Items in selected Cat)
+        window.grid_columnconfigure(0, weight=1) 
+        window.grid_columnconfigure(1, weight=2)
+        window.grid_rowconfigure(1, weight=1)
+        
+        # Top Bar: Add Category
+        top = ctk.CTkFrame(window, height=50)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        
+        def add_cat():
+            new_name = simpledialog.askstring("新增分類", "名稱:", parent=window)
+            if new_name:
+                if self.db.add_category(new_name):
+                    refresh_cats()
+                else:
+                    messagebox.showerror("錯誤", "新增失敗", parent=window)
+                    
+        ctk.CTkButton(top, text="+ 新增分類", width=100, command=add_cat).pack(side="left", padx=10)
+        
+        # Category List
+        full_frame_l = ctk.CTkFrame(window)
+        full_frame_l.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        ctk.CTkLabel(full_frame_l, text="選擇分類", font=ctk.CTkFont(weight="bold")).pack()
+        
+        lb_cats = tk.Listbox(full_frame_l, bg="#2b2b2b", fg="white", selectbackground="#F0A500", selectforeground="black", height=20, exportselection=False)
+        lb_cats.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Item List
+        full_frame_r = ctk.CTkFrame(window)
+        full_frame_r.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+        self.lbl_current_cat = ctk.CTkLabel(full_frame_r, text="物品清單", font=ctk.CTkFont(weight="bold"))
+        self.lbl_current_cat.pack()
+        
+        cols = ("ID", "名稱")
+        tree = ttk.Treeview(full_frame_r, columns=cols, show="headings")
+        tree.heading("ID", text="ID")
+        tree.heading("名稱", text="名稱")
+        tree.column("ID", width=80)
+        tree.column("名稱", width=250)
+        tree.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # State
+        current_cat_id = [None]
+        
+        def refresh_cats():
+            lb_cats.delete(0, tk.END)
+            updated_cats = self.db.get_categories()
+            # Update closure scope maps
+            cats.clear() 
+            cats.update(updated_cats)
+            
+            for cid, cname in updated_cats.items():
+                lb_cats.insert(tk.END, cname)
+                
+        def on_cat_select(evt):
+            sel = lb_cats.curselection()
+            if not sel: return
+            cname = lb_cats.get(sel[0])
+            # Find ID
+            cid = next((k for k, v in cats.items() if v == cname), None)
+            if cid:
+                current_cat_id[0] = cid
+                self.lbl_current_cat.configure(text=f"分類: {cname}")
+                load_items(cid)
+                
+        def load_items(cid):
+            for item in tree.get_children():
+                tree.delete(item)
+            items = self.db.get_favorites(cid) # (id, name, cat_id)
+            for iid, iname, _ in items:
+                dname = self.translate_term(iname)
+                tree.insert("", "end", values=(iid, dname))
+                
+        def move_item():
+            sel_item = tree.selection()
+            if not sel_item: return
+            
+            # Show target selection dialog
+            target_name = simpledialog.askstring("移動至...", f"輸入目標分類名稱 ({', '.join(cats.values())})", parent=window)
+            
+            target_id = next((k for k, v in cats.items() if v == target_name), None)
+            
+            if target_id:
+                for item in sel_item:
+                    vals = tree.item(item)['values']
+                    iid = vals[0]
+                    self.db.update_favorite_category(iid, target_id)
+                load_items(current_cat_id[0])
+                if hasattr(self, 'update_scanner_cat_menu'):
+                     self.update_scanner_cat_menu()
+            else:
+                 messagebox.showerror("錯誤", "找不到該分類", parent=window)
+
+        def remove_item():
+            sel_item = tree.selection()
+            if not sel_item: return
+            if messagebox.askyesno("確認", "從最愛移除選中物品?", parent=window):
+                for item in sel_item:
+                    vals = tree.item(item)['values']
+                    iid = vals[0]
+                    self.db.remove_favorite(iid)
+                load_items(current_cat_id[0])
+                if hasattr(self, 'update_scanner_cat_menu'):
+                     self.update_scanner_cat_menu()
+
+        # Actions
+        btn_frame = ctk.CTkFrame(window)
+        btn_frame.grid(row=2, column=0, columnspan=2, fill="x", padx=10, pady=10)
+        
+        ctk.CTkButton(btn_frame, text="移動至另一分類", command=move_item).pack(side="left", padx=20)
+        ctk.CTkButton(btn_frame, text="移除物品", command=remove_item, fg_color="#E04F5F").pack(side="right", padx=20)
+        
+        lb_cats.bind("<<ListboxSelect>>", on_cat_select)
+        refresh_cats()
 
     def open_settings_window(self):
         window = ctk.CTkToplevel(self)
@@ -1039,62 +1173,123 @@ class FF14MarketApp(ctk.CTk):
             threading.Thread(target=self._process_crafting_logic, args=(self.current_item_id, self.current_item_name)).start()
             return
 
-        query = self.search_entry.get().strip()
-        if not query:
+        raw_input = self.search_entry.get().strip()
+        if not raw_input:
             return
             
         if self.is_loading: return
 
-        # Apply vocabulary translation
-        original_query = query
-        query = self.translate_term(query)
-        if original_query != query:
-            logging.info(f"Vocab Applied: '{original_query}' -> '{query}'")
+        # [Alias Search Logic]
+        # 1. Split by spaces
+        tokens = raw_input.split()
+        
+        # 2. Display & Logging
+        display_str = " ".join(tokens)
+        self.status_bar.configure(text=f"正在搜尋: {display_str} ...")
 
         self.search_button.configure(state="disabled")
         self.reset_analysis_ui()
-        # Also forget header buttons for new search
         self.toggle_fav_button.pack_forget()
         self.refresh_button.pack_forget()
-        self.status_bar.configure(text=f"正在搜尋: {query} ...")
         
-        # searching process is just DB/API lookup, not the heavy loading yet, but can still block overlaps
-        # Ideally perform_search_process sets loading True when it starts doing heavy work or immediately
-        # But perform_search_process calls show_candidate_selection which calls fetch_market_data.
-        # Let's simple guard the search process itself too.
-        # self.is_loading = True -> No, search process leads to selection leads to fetch. 
-        # Actually perform_search_process is fast (DB or API search), the main "loading" is market data.
-        # But we don't want multiple searches running.
+        # 3. Pass raw tokens to Search Process (SQL logic handles aliases)
+        threading.Thread(target=self.perform_search_process, args=(tokens,)).start()
 
-        threading.Thread(target=self.perform_search_process, args=(query,)).start()
-
-    def perform_search_process(self, query):
+    def perform_search_process(self, tokens):
+        # tokens is a list of resolved search terms (Original Names or Raw Keywords)
         candidates = []
-        if query.isdigit():
-            item_id = int(query)
+        
+        # Check if single ID
+        if len(tokens) == 1 and tokens[0].isdigit():
+            item_id = int(tokens[0])
             logging.info(f"輸入為數字 ID: {item_id}")
             name = self.db.get_item_name_by_id(item_id)
             if name:
                 candidates.append((item_id, name))
             else:
-                candidates = self.api.search_item_web(query)
+                candidates = self.api.search_item_web(tokens[0])
                 if candidates:
-                     # cache result
                      for cid, cname in candidates:
                          self.db.cache_item(cid, cname)
             
             if not candidates:
                 candidates.append((item_id, f"未知物品 (ID: {item_id})"))
         else:
-            candidates = self.db.search_local_items(query, limit=20)
+            # Multi-keyword local search with Resolved Tokens
+            candidates = self.db.search_local_items(tokens, limit=20)
             if not candidates:
                 logging.info("本地無結果，嘗試聯網搜尋...")
-                candidates = self.api.search_item_web(query)
+                query_str = " ".join(tokens)
+                candidates = self.api.search_item_web(query_str)
                 if candidates:
                     for cid, cname in candidates:
                         self.db.cache_item(cid, cname)
 
         self.after(0, lambda: self.show_candidate_selection(candidates))
+
+    def show_candidate_selection(self, candidates):
+        if not candidates:
+            self.status_bar.configure(text="找不到相關物品。", text_color="red")
+            self.search_button.configure(state="normal")
+            return
+            
+        # If perfect match (1 result), auto-select
+        if len(candidates) == 1:
+            self.current_item_id = candidates[0][0]
+            self.current_item_name = candidates[0][1] # This is Original Name from DB
+            
+            # Translate for Display
+            display_name = self.translate_term(self.current_item_name)
+            
+            self.update_title(display_name, self.current_item_id)
+            self.fetch_market_data(self.current_item_id)
+            
+            # Sync Crafting
+            self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
+            threading.Thread(target=self._process_crafting_logic, args=(self.current_item_id, self.current_item_name)).start()
+            return
+
+        # Multiple candidates -> Show Selection Popup
+        window = ctk.CTkToplevel(self)
+        window.title("請選擇物品")
+        window.geometry("400x600")
+        window.attributes("-topmost", True)
+        
+        ctk.CTkLabel(window, text="搜尋結果 (請點擊選擇):", font=ctk.CTkFont(weight="bold")).pack(pady=10)
+        
+        scroll = ctk.CTkScrollableFrame(window, width=350, height=500)
+        scroll.pack(pady=10, padx=10, fill="both", expand=True)
+
+        def on_select(item_id, item_name):
+            if self.is_loading: return
+            window.destroy()
+            self.current_item_id = item_id
+            self.current_item_name = item_name # Keep Original Name for logic
+            
+            # Translate for Display
+            display_name = self.translate_term(item_name)
+            
+            self.after(0, lambda: self.update_title(display_name, item_id))
+            
+            self.is_loading = True
+            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
+            
+            if hasattr(self, 'lbl_craft_status'):
+                self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
+            
+            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
+
+        for item_id, item_name in candidates:
+            # Translate each candidate in the list for better UX
+            display_name = self.translate_term(item_name)
+            btn_text = f"{display_name}\n(ID: {item_id})"
+            
+            btn = ctk.CTkButton(scroll, text=btn_text, anchor="w", height=50, 
+                                command=lambda i=item_id, n=item_name: on_select(i, n),
+                                fg_color="transparent", border_width=1, text_color="white")
+            btn.pack(pady=2, fill="x")
+
+        self.search_button.configure(state="normal")
 
     def update_title(self, name, iid):
         self.item_title_label.configure(text=name)
@@ -1102,14 +1297,14 @@ class FF14MarketApp(ctk.CTk):
         self.update_favorite_button_state()
 
     def fetch_market_data(self, item_id):
-        self.after(0, lambda: self.prepare_loading_ui())
+        self.after(0, lambda: self.prepare_loading_ui(clear_data=True))
         
         try:
             data, status = self.api.fetch_market_data(self.selected_dc, item_id)
             
             self.is_loading = False 
             if status == 404:
-                self.update_ui_error(f"在所選區域找不到數據 (404)。\n請確認伺服器名稱是否為英文。")
+                self.update_ui_error(f"在所選區域找不到數據 (404)。\n請確認伺服器名稱與物品是否存在。")
                 return
             if status != 200 or not data:
                 self.update_ui_error(f"API 請求錯誤 (Code: {status})")
@@ -1133,23 +1328,31 @@ class FF14MarketApp(ctk.CTk):
         if not self.current_data:
             return
         
-        self.prepare_loading_ui()
+        self.prepare_loading_ui(clear_data=False)
         self.status_bar.configure(text="正在重新計算分析數據...", text_color="yellow")
         threading.Thread(target=self._recalculate_process).start()
 
     def _recalculate_process(self):
         time.sleep(0.3) 
         hq_only = self.hq_only_var.get()
-        new_analysis = DataAnalyzer.calculate_metrics(self.current_data, self.config, hq_only)
-        self.current_analysis = new_analysis
-        self.is_loading = False
-        self.after(0, lambda: self.finish_loading_and_update(self.current_data, new_analysis))
+        if self.current_data:
+            new_analysis = DataAnalyzer.calculate_metrics(self.current_data, self.config, hq_only)
+            self.current_analysis = new_analysis
+            self.is_loading = False
+            self.after(0, lambda: self.finish_loading_and_update(self.current_data, new_analysis))
+        else:
+             self.is_loading = False
 
-    def prepare_loading_ui(self):
+    def prepare_loading_ui(self, clear_data=True):
         self.search_button.configure(state="disabled")
         self.listings_tree.delete(*self.listings_tree.get_children())
         self.history_tree.delete(*self.history_tree.get_children())
         self.reset_analysis_ui()
+
+        if clear_data:
+            # Only clear explicitly when starting a NEW search
+            self.current_data = None
+            self.current_analysis = None
 
         self.progress_frame.pack(side="left", padx=(20, 0))
         self.progress_bar.set(0)
@@ -1336,7 +1539,7 @@ class FF14MarketApp(ctk.CTk):
             webbrowser.open("https://universalis.app/")
 # --- Hot Item Scanner (Tab) ---
     def setup_tab_scanner(self):
-        tab = self.tabview.tab("🔥 熱銷掃描")
+        tab = self.tabview.tab("⭐ 我的最愛掃描")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
 
@@ -1344,9 +1547,16 @@ class FF14MarketApp(ctk.CTk):
         ctrl_frame = ctk.CTkFrame(tab, fg_color="transparent")
         ctrl_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         
-        # Sources - [Simplified] Only Favorites
-        self.lbl_source = ctk.CTkLabel(ctrl_frame, text="掃描來源: 我的最愛清單 (Favorites)", font=ctk.CTkFont(weight="bold"))
-        self.lbl_source.pack(side="left", padx=10)
+        # Source Label
+        ctk.CTkLabel(ctrl_frame, text="掃描範圍:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(10, 5))
+        
+        # Category Dropdown
+        self.scan_cat_var = ctk.StringVar(value="全部 (All)")
+        self.scan_cat_menu = ctk.CTkComboBox(ctrl_frame, width=150, variable=self.scan_cat_var)
+        self.scan_cat_menu.pack(side="left", padx=5)
+        
+        # Initialize Menu
+        self.update_scanner_cat_menu()
         
         # Time Slider
         slider_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
@@ -1369,6 +1579,13 @@ class FF14MarketApp(ctk.CTk):
         slider.set(24)
         slider.pack()
         
+        # Batch Checkbox
+        self.batch_scan_var = ctk.BooleanVar(value=True) # Default On for speed? User asked if it CAN be done. Let's default False as per plan? User said "batch search... add it". I'll default to False for safety, user can tick.
+        # Actually plan said Default False.
+        self.batch_scan_var.set(False)
+        self.chk_batch = ctk.CTkCheckBox(ctrl_frame, text="⚡ 批次快速掃描", variable=self.batch_scan_var)
+        self.chk_batch.pack(side="left", padx=10)
+        
         # Scan Button
         self.btn_scan = ctk.CTkButton(ctrl_frame, text="開始掃描", command=self.start_scan_thread, fg_color="#E04F5F", hover_color="#C03A48")
         self.btn_scan.pack(side="right", padx=10)
@@ -1376,7 +1593,6 @@ class FF14MarketApp(ctk.CTk):
         # Progress
         self.scan_progress = ctk.CTkProgressBar(ctrl_frame, height=5)
         self.scan_progress.set(0)
-        # self.scan_progress.pack(side="bottom", fill="x", pady=5) # Show only when active
         
         # 2. Results Table
         res_frame = ctk.CTkFrame(tab)
@@ -1407,6 +1623,18 @@ class FF14MarketApp(ctk.CTk):
         # Double click to jump
         self.scan_tree.bind("<Double-1>", self.on_scan_result_click)
 
+    def update_scanner_cat_menu(self):
+        cats = self.db.get_categories()
+        logging.info(f"DEBUG: cats type={type(cats)}, value={cats}")
+        if isinstance(cats, list):
+             # Fallback if list (should act as dict)
+             options = ["全部 (All)"] + [c[1] for c in cats] # Assuming list of tuples?
+        else:
+             options = ["全部 (All)"] + list(cats.values())
+             
+        self.scan_cat_menu.configure(values=options)
+        self.scan_cat_menu.set("全部 (All)")
+
     def start_scan_thread(self):
         server = self.dc_option_menu.get()
         if not server or server == "請先新增伺服器":
@@ -1418,92 +1646,139 @@ class FF14MarketApp(ctk.CTk):
         self.scan_progress.set(0)
         
         hours = self.scan_hours_var.get()
-        # No sources needed, always fav
+        cat_name = self.scan_cat_var.get()
+        is_batch = self.batch_scan_var.get()
         
-        threading.Thread(target=self.run_scanner, args=(server, hours), daemon=True).start()
+        # Resolve Cat ID
+        cat_id = None
+        if cat_name != "全部 (All)":
+            cats = self.db.get_categories()
+            # Handle List vs Dict return from DB
+            if isinstance(cats, list):
+                # list of tuples [(id, name), ...]
+                cat_id = next((c[0] for c in cats if c[1] == cat_name), None)
+            else:
+                # dict {id: name}
+                cat_id = next((k for k, v in cats.items() if v == cat_name), None)
 
-    def run_scanner(self, server, hours):
+        threading.Thread(target=self.run_scanner, args=(server, hours, cat_id, is_batch), daemon=True).start()
+
+    def run_scanner(self, server, hours, category_id=None, is_batch=False):
         try:
-            # 1. Gather IDs (Only Favorites)
+            # 1. Gather IDs (Filter by Category)
             target_ids = set()
             
-            favs = self.db.get_favorites()
+            favs = self.db.get_favorites(category_id)
             for fav in favs:
                 target_ids.add(fav[0]) # ID
 
             if not target_ids:
-                self.after(0, lambda: self.finish_scan([], "我的最愛清單為空，請先加入物品"))
+                self.after(0, lambda: self.finish_scan([], "該分類清單為空"))
                 return
 
             id_list = list(target_ids)
             total = len(id_list)
-            self.append_log(f"開始掃描 {total} 個最愛物品...")
+            
+            mode_str = "批次模式" if is_batch else "循序模式"
+            self.append_log(f"開始掃描 {total} 個最愛物品 ({mode_str})...")
             
             results = []
-            batch_size = 50
-            processed = 0
             
-            # Batch Fetch
-            data_map, _ = self.api.fetch_market_data_batch(server, id_list)
+            if is_batch:
+                # --- BATCH MODE ---
+                self.after(0, lambda: self.scan_progress.set(0.1))
+                data_map, status = self.api.fetch_market_data_batch(server, id_list)
+                
+                if status == 200:
+                    raw_list = list(data_map.values())
+                    self.append_log(f"API 回傳資料筆數: {len(raw_list)}")
+                    cleaned_list = DataAnalyzer.clean_market_data(raw_list, min_price_threshold=0)
+                    self.append_log(f"有效資料筆數: {len(cleaned_list)}")
+                    
+                    for item_data in cleaned_list:
+                        item_id = item_data.get("itemID")
+                        name = self.db.get_item_name_by_id(item_id) or str(item_id)
+                        name = self.translate_term(name)
+                        
+                        history = item_data.get("recentHistory", [])
+                        sold, _ = DataAnalyzer.calculate_velocity_in_timeframe(history, hours)
+                        
+                        heat_val = sold if hours < 24 else sold / (hours/24.0)
+
+                        min_price = item_data.get("minPrice", 0)
+                        listings = item_data.get("listings", [])
+                        current_stock = len(listings)
+                        avg_price = int(sum(l["pricePerUnit"] for l in listings) / current_stock) if current_stock else 0
+
+                        results.append({
+                            "name": name,
+                            "heat": heat_val,
+                            "avg": avg_price,
+                            "stock": current_stock,
+                            "min": min_price,
+                            "id": item_id
+                        })
+                else:
+                    self.append_log(f"批次掃描發生錯誤: HTTP {status}")
+                
+                self.after(0, lambda: self.scan_progress.set(1.0))
             
-            # Process Data
-            # Note: fetch_market_data_batch usually returns dictionary { "itemID": data ... }
-            # Or { "items": { "itemID": data } } depends on my impl.
-            # My impl returns  all_items_data which is a dict.
-            
-            # Pre-filter (Garbage collection)
-            raw_list = list(data_map.values())
-            cleaned_list = DataAnalyzer.clean_market_data(raw_list, min_price_threshold=300)
-            
-            for item_data in cleaned_list:
-                # Basic Info
-                item_id = item_data.get("itemID")
-                # Need Name? We might just have ID. DB cache check.
-                # If name missing, try to get from cache or just show ID?
-                # Ideally we check cache.
-                name = self.db.get_item_name_by_id(item_id)
-                if not name:
-                    name = f"Item#{item_id}" # Fallback
-                
-                # Analyze Velocity
-                history = item_data.get("recentHistory", [])
-                sold, _ = DataAnalyzer.calculate_velocity_in_timeframe(history, hours)
-                
-                # If hours >= 24, we show Velocity (Daily)
-                # If hours < 24, we show Sold Count
-                heat_val = sold
-                if hours >= 24:
-                    heat_val = sold / (hours/24.0)
-                
-                listings = item_data.get("listings", [])
-                min_price = listings[0].get("pricePerUnit", 0) if listings else 0
-                avg_price_val = 0
-                if history:
-                    avg_price_val = sum(h['pricePerUnit'] for h in history[:5]) / len(history[:5])
-                
-                stock = sum(l.get("quantity", 0) for l in listings)
-                
-                results.append({
-                    "id": item_id,
-                    "name": name,
-                    "heat": heat_val,
-                    "avg": avg_price_val,
-                    "stock": stock,
-                    "min": min_price
-                })
-                
-                processed += 1
-                # Update progress roughly? No, batch is fast.
-            
+            else:
+                # --- SEQUENTIAL MODE ---
+                for i, item_id in enumerate(id_list):
+                    # Update Progress
+                    progress = (i + 1) / total
+                    self.after(0, lambda p=progress: self.scan_progress.set(p))
+                    
+                    current_name = self.db.get_item_name_by_id(item_id) or str(item_id)
+                    current_name = self.translate_term(current_name)
+                    
+                    try:
+                        raw_data, status = self.api.fetch_market_data(server, item_id)
+                        
+                        if status != 200 or not raw_data:
+                            logging.warning(f"Item {item_id} fetch failed or empty. Status: {status}")
+                            continue
+
+                        cleaned_list = DataAnalyzer.clean_market_data([raw_data], min_price_threshold=0)
+                        if not cleaned_list: continue
+                             
+                        item_data = cleaned_list[0]
+                        history = item_data.get("recentHistory", [])
+                        sold, _ = DataAnalyzer.calculate_velocity_in_timeframe(history, hours)
+                        
+                        heat_val = sold if hours < 24 else sold / (hours/24.0)
+
+                        min_price = item_data.get("minPrice", 0)
+                        listings = item_data.get("listings", [])
+                        current_stock = len(listings)
+                        avg_price = int(sum(l["pricePerUnit"] for l in listings) / current_stock) if current_stock else 0
+
+                        results.append({
+                            "name": current_name,
+                            "heat": heat_val,
+                            "avg": avg_price,
+                            "stock": current_stock,
+                            "min": min_price,
+                            "id": item_id
+                        })
+                        time.sleep(0.1)
+                        
+                    except Exception as inner_e:
+                        logging.error(f"Error scanning item {item_id}: {inner_e}")
+                        continue
+
             # Sort by Heat
             results.sort(key=lambda x: x["heat"], reverse=True)
-            top_results = results[:50]
             
-            self.after(0, lambda: self.finish_scan(top_results, None))
-            
+            self.append_log(f"掃描完成! 共 {len(results)} 筆")
+            self.after(0, lambda: self.finish_scan(results, None))
+
         except Exception as e:
-            error_msg = str(e)
-            self.after(0, lambda: self.finish_scan([], error_msg))
+            logging.exception("Scanner failed")
+            self.after(0, lambda: self.finish_scan([], f"掃描失敗: {str(e)}"))
+
+
 
     def finish_scan(self, results, error):
         self.btn_scan.configure(state="normal")
