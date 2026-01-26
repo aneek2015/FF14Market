@@ -303,13 +303,21 @@ class FF14MarketApp(ctk.CTk):
 
 
     def append_log(self, msg):
-        """接收來自 logging 的訊息"""
-        self.log_history.append(msg)
-        if self.debug_window and self.debug_textbox and self.debug_window.winfo_exists():
-            self.debug_textbox.configure(state="normal")
-            self.debug_textbox.insert("end", msg + "\n")
-            self.debug_textbox.see("end")
-            self.debug_textbox.configure(state="disabled")
+        """接收來自 logging 的訊息 (Thread-Safe)"""
+        # 1. 數據操作 (list append) 在 python 是 atomic 的 (大多情況)，但為求保險與一致性，
+        #    我們還是讓它留在呼叫當下執行，或者也放入 main thread。
+        #    這裡簡單處理：改為全由主執行緒負責更新，避免 Race Condition。
+        
+        def _update_ui():
+            self.log_history.append(msg)
+            if self.debug_window and self.debug_textbox and self.debug_window.winfo_exists():
+                self.debug_textbox.configure(state="normal")
+                self.debug_textbox.insert("end", msg + "\n")
+                self.debug_textbox.see("end")
+                self.debug_textbox.configure(state="disabled")
+
+        # 將工作排程到主執行緒
+        self.after(0, _update_ui)
 
     def setup_treeview_style(self):
         """配置 Treeview 的深色主題樣式"""
@@ -1179,117 +1187,172 @@ class FF14MarketApp(ctk.CTk):
             
         if self.is_loading: return
 
-        # [Alias Search Logic]
-        # 1. Split by spaces
-        tokens = raw_input.split()
-        
-        # 2. Display & Logging
-        display_str = " ".join(tokens)
-        self.status_bar.configure(text=f"正在搜尋: {display_str} ...")
+        if self.is_loading: return
+
+        # 呼叫新的多執行緒搜尋
+        self.search_item_thread(raw_input)
+
+    def search_item_thread(self, query):
+        """
+        啟動搜尋執行緒 (Entry Point) - 替代原本的 perform_search_process
+        """
+        if not query:
+            return
 
         self.search_button.configure(state="disabled")
-        self.reset_analysis_ui()
-        self.toggle_fav_button.pack_forget()
-        self.refresh_button.pack_forget()
+        self.status_bar.configure(text=f"正在搜尋: {query} ...")
         
-        # 3. Pass raw tokens to Search Process (SQL logic handles aliases)
-        threading.Thread(target=self.perform_search_process, args=(tokens,)).start()
+        # 切換到掃描結果分頁以顯示搜尋結果 (因為我們共用 TreeView)
+        self.tabview.set("⭐ 我的最愛掃描") 
+        
+        # 清空舊的顯示
+        self.scan_tree.delete(*self.scan_tree.get_children())
+        
+        # 啟動背景工作
+        threading.Thread(target=self._run_search_task, args=(query,), daemon=True).start()
 
-    def perform_search_process(self, tokens):
-        # tokens is a list of resolved search terms (Original Names or Raw Keywords)
-        candidates = []
-        
-        # Check if single ID
-        if len(tokens) == 1 and tokens[0].isdigit():
-            item_id = int(tokens[0])
-            logging.info(f"輸入為數字 ID: {item_id}")
-            name = self.db.get_item_name_by_id(item_id)
-            if name:
-                candidates.append((item_id, name))
+    def _run_search_task(self, query):
+        """
+        [背景執行緒] 搜尋 Item + 同步檢查製作狀態
+        """
+        try:
+            # 由於 append_log 已經修復為 Thread-Safe，這裡可以放心使用 logging
+            logging.info(f"開始多執行緒搜尋: {query}")
+            
+            # 嘗試解析是否為 ID
+            if query.isdigit():
+                 item_id = int(query)
+                 name = self.db.get_item_name_by_id(item_id)
+                 results = [{'id': item_id, 'name': name}] if name else []
+                 if not results:
+                     # 嘗試透過 API 搜尋 ID
+                      results = [{'id': c[0], 'name': c[1]} for c in self.api.search_item_web(query)]
             else:
-                candidates = self.api.search_item_web(tokens[0])
-                if candidates:
-                     for cid, cname in candidates:
-                         self.db.cache_item(cid, cname)
+                 # 關鍵字搜尋 (先本地後 API)
+                 local_res = self.db.search_local_items(query.split(), limit=50) # Split specifically for DB method
+                 if local_res:
+                     results = [{'id': r[0], 'name': r[1]} for r in local_res]
+                 else:
+                     # Fallback to API
+                     api_res = self.api.search_item_web(query)
+                     results = [{'id': c[0], 'name': c[1]} for c in api_res]
+
+            if not results:
+                self.after(0, lambda: self._search_finished([], "找不到相關物品。"))
+                return
+
+            logging.info(f"搜尋找到 {len(results)} 筆結果, 開始分析製作狀態...")
             
-            if not candidates:
-                candidates.append((item_id, f"未知物品 (ID: {item_id})"))
-        else:
-            # Multi-keyword local search with Resolved Tokens
-            candidates = self.db.search_local_items(tokens, limit=20)
-            if not candidates:
-                logging.info("本地無結果，嘗試聯網搜尋...")
-                query_str = " ".join(tokens)
-                candidates = self.api.search_item_web(query_str)
-                if candidates:
-                    for cid, cname in candidates:
-                        self.db.cache_item(cid, cname)
+            # 準備顯示資料
+            display_data = []
+            server = self.selected_dc
+            
+            for item in results:
+                item_id = item.get('id')
+                item_name = item.get('name') or f"Unknown ({item_id})"
+                
+                # [Optimization] Cache name if new
+                if not self.db.get_item_name_by_id(item_id):
+                    self.db.cache_item(item_id, item_name)
 
-        self.after(0, lambda: self.show_candidate_selection(candidates))
+                # 檢查製作狀態
+                crafting_info = self.crafting_service.get_crafting_data(item_id, server)
+                
+                craft_status = "❌ 無法製作"
+                if crafting_info.get('status') != 'no_recipe':
+                    craft_status = "🔨 可製作"
+                
+                price_info = "---"
 
-    def show_candidate_selection(self, candidates):
-        if not candidates:
-            self.status_bar.configure(text="找不到相關物品。", text_color="red")
+                display_data.append({
+                    'id': item_id,
+                    'name': item_name,
+                    'craft_status': craft_status,
+                    'price_info': price_info
+                })
+            
+            # 將 UI 更新排程回主執行緒 (雖然在 _update_search_ui 裡面也是安全的，但這裡作為一個 Task 結束點)
+            self.after(0, lambda: self._update_search_ui(display_data))
+
+        except Exception as e:
+            logging.error(f"搜尋執行緒錯誤: {e}")
+            self.after(0, lambda: self._search_finished([], f"錯誤: {e}"))
+
+    def _update_search_ui(self, display_data):
+        """
+        [主執行緒] 更新 UI - 動態切換 TreeView 欄位為搜尋模式
+        """
+        try:
+            self.scan_tree.delete(*self.scan_tree.get_children())
+            
+            # 1. 動態切換顯示欄位 (搜尋模式)
+            cols = ("ID", "名稱", "製作狀態", "價格資訊")
+            self.scan_tree.configure(columns=cols, show="headings")
+            
+            self.scan_tree.heading("ID", text="ID")
+            self.scan_tree.heading("名稱", text="名稱")
+            self.scan_tree.heading("製作狀態", text="製作狀態")
+            self.scan_tree.heading("價格資訊", text="價格資訊")
+            
+            self.scan_tree.column("ID", width=60, anchor="center")
+            self.scan_tree.column("名稱", width=250, anchor="w")
+            self.scan_tree.column("製作狀態", width=100, anchor="center")
+            self.scan_tree.column("價格資訊", width=100, anchor="center")
+
+            # 2. 插入資料
+            if not display_data:
+                self.status_bar.configure(text="無搜尋結果")
+            else:
+                self.status_bar.configure(text=f"搜尋完成: 找到 {len(display_data)} 筆資料")
+
+            for data in display_data:
+                # 翻譯名稱
+                d_name = self.translate_term(data['name'])
+                
+                values = (
+                    data['id'],
+                    d_name,
+                    data['craft_status'],
+                    data['price_info']
+                )
+                self.scan_tree.insert("", "end", values=values)
+            
+            # 儲存結果以供點擊使用
+            self.last_scan_results = display_data 
+            
+        except Exception as e:
+            logging.error(f"UI Update Error: {e}")
+        finally:
             self.search_button.configure(state="normal")
+
+    def _search_finished(self, results, msg):
+        self.status_bar.configure(text=msg)
+        self.search_button.configure(state="normal")
+        if not results:
+             self.scan_tree.delete(*self.scan_tree.get_children())
+
+    def start_search(self, use_current_id=False):
+        if not self.selected_dc or self.selected_dc == "尚未設定伺服器":
+            messagebox.showwarning("提示", "請先選擇或新增一個伺服器。")
             return
-            
-        # If perfect match (1 result), auto-select
-        if len(candidates) == 1:
-            self.current_item_id = candidates[0][0]
-            self.current_item_name = candidates[0][1] # This is Original Name from DB
-            
-            # Translate for Display
-            display_name = self.translate_term(self.current_item_name)
-            
-            self.update_title(display_name, self.current_item_id)
-            self.fetch_market_data(self.current_item_id)
-            
-            # Sync Crafting
-            self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
+
+        if use_current_id and self.current_item_id:
+            if self.is_loading: return
+            logging.info(f"Refreshing data for item ID: {self.current_item_id}")
+            self.status_bar.configure(text=f"正在刷新 {self.current_item_name} 的數據...", text_color="yellow")
+            self.is_loading = True
+            threading.Thread(target=self.fetch_market_data, args=(self.current_item_id,)).start()
             threading.Thread(target=self._process_crafting_logic, args=(self.current_item_id, self.current_item_name)).start()
             return
 
-        # Multiple candidates -> Show Selection Popup
-        window = ctk.CTkToplevel(self)
-        window.title("請選擇物品")
-        window.geometry("400x600")
-        window.attributes("-topmost", True)
-        
-        ctk.CTkLabel(window, text="搜尋結果 (請點擊選擇):", font=ctk.CTkFont(weight="bold")).pack(pady=10)
-        
-        scroll = ctk.CTkScrollableFrame(window, width=350, height=500)
-        scroll.pack(pady=10, padx=10, fill="both", expand=True)
+        raw_input = self.search_entry.get().strip()
+        if not raw_input:
+            return
+            
+        if self.is_loading: return
 
-        def on_select(item_id, item_name):
-            if self.is_loading: return
-            window.destroy()
-            self.current_item_id = item_id
-            self.current_item_name = item_name # Keep Original Name for logic
-            
-            # Translate for Display
-            display_name = self.translate_term(item_name)
-            
-            self.after(0, lambda: self.update_title(display_name, item_id))
-            
-            self.is_loading = True
-            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
-            
-            if hasattr(self, 'lbl_craft_status'):
-                self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
-            
-            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
-
-        for item_id, item_name in candidates:
-            # Translate each candidate in the list for better UX
-            display_name = self.translate_term(item_name)
-            btn_text = f"{display_name}\n(ID: {item_id})"
-            
-            btn = ctk.CTkButton(scroll, text=btn_text, anchor="w", height=50, 
-                                command=lambda i=item_id, n=item_name: on_select(i, n),
-                                fg_color="transparent", border_width=1, text_color="white")
-            btn.pack(pady=2, fill="x")
-
-        self.search_button.configure(state="normal")
+        # 直接呼叫新的多執行緒搜尋 (不再使用 perform_search_process)
+        self.search_item_thread(raw_input)
 
     def update_title(self, name, iid):
         self.item_title_label.configure(text=name)
@@ -1791,6 +1854,21 @@ class FF14MarketApp(ctk.CTk):
         # Bind to tree
         self.scan_tree.delete(*self.scan_tree.get_children())
         
+        # 動態還原顯示欄位 (掃描模式)
+        cols = ("名稱", "熱度", "均價", "庫存", "最低價")
+        self.scan_tree.configure(columns=cols, show="headings")
+        self.scan_tree.heading("名稱", text="名稱")
+        self.scan_tree.heading("熱度", text="熱度指標")
+        self.scan_tree.heading("均價", text="均價")
+        self.scan_tree.heading("庫存", text="庫存")
+        self.scan_tree.heading("最低價", text="最低價")
+        
+        self.scan_tree.column("名稱", width=250)
+        self.scan_tree.column("熱度", width=100)
+        self.scan_tree.column("均價", width=80)
+        self.scan_tree.column("庫存", width=60)
+        self.scan_tree.column("最低價", width=80)
+        
         hours = self.scan_hours_var.get()
         unit_label = "個/日" if hours >= 24 else f"個({hours}h)"
         self.scan_tree.heading("熱度", text=f"熱度 ({unit_label})")
@@ -1803,8 +1881,7 @@ class FF14MarketApp(ctk.CTk):
                 f"{int(r['avg']):,}",
                 f"{r['stock']:,}",
                 f"{int(r['min']):,}",
-                r['id'] # Hidden value trick? No, treeview values usually pure display. 
-                        # We need index to map back to ID.
+                r['id']
             ))
             
         # Store raw results for click mapping
@@ -1822,19 +1899,33 @@ class FF14MarketApp(ctk.CTk):
             item_id = data['id']
             item_name = data['name']
             
-            # Jump to Main Tab
-            self.tabview.set("市場查詢")
-            self.entry_search.delete(0, "end")
-            self.entry_search.insert(0, str(item_id)) # Use ID for precision
-            # Perform search?
-            # We can invoke the search function logic
-            self.perform_search_by_id(item_id, item_name)
+            # Update Current Context
+            self.current_item_id = item_id
+            self.current_item_name = item_name
 
-    def perform_search_by_id(self, item_id, item_name):
-        self.search_item_thread(str(item_id)) # Reuse existing thread wrapper if flexible
-        # Actually search_item_thread takes query string.
-        # If I pass ID string, `market_api` search_item_web handles digit string as ID lookup first.
-        # So passing ID string is safe.
+            # Translate for Display
+            display_name = self.translate_term(item_name)
+            self.update_title(display_name, item_id)
+            
+            # Jump to Overview Tab
+            self.tabview.set("市場概況") 
+            
+            # Update Sidebar Entry (Visual only, no trigger)
+            self.search_entry.delete(0, "end")
+            self.search_entry.insert(0, str(item_id))
+
+            # Fetch Data Directly
+            if self.is_loading: return
+            self.is_loading = True
+            
+            self.status_bar.configure(text=f"正在載入 {display_name} ...", text_color="yellow")
+            
+            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
+            
+            if hasattr(self, 'lbl_craft_status'):
+                self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
+            
+            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
 
 if __name__ == "__main__":
     app = FF14MarketApp()

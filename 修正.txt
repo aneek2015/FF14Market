@@ -1,0 +1,118 @@
+# ... existing code ...
+    def search_item_thread(self, query):
+        """
+        啟動搜尋執行緒 (Entry Point)
+        """
+        # 清空舊的顯示 (可以在主執行緒做)
+        self.btn_search.configure(state="disabled")
+        self.status_label.configure(text="🔍 搜尋中...")
+        self.scan_tree.delete(*self.scan_tree.get_children())
+
+        # 啟動背景工作，傳入查詢字串
+        threading.Thread(target=self._run_search_task, args=(query,), daemon=True).start()
+
+    def _run_search_task(self, query):
+        """
+        [背景執行緒] 只負責抓資料與計算，絕對不碰 UI
+        """
+        try:
+            # 1. 執行 API 搜尋 (耗時操作)
+            # 注意：這裡使用 market_api 裡面的 search_item_web
+            # 如果您有自訂的邏輯，請將結果整理成 list
+            # 假設您的 market_api 回傳的是標準格式
+            
+            # 模擬您的日誌
+            logging.info(f"開始搜尋: {query}")
+            
+            # 這裡呼叫您的 API 邏輯 (請依據您實際的變數名稱調整)
+            # 假設 search_item_web 回傳的是一個包含 item_id 的列表
+            results = self.market_api.search_item_web(query)
+            
+            if not results:
+                self.append_log("找不到相關物品。")
+                self.after(0, lambda: self._search_finished([], "找不到物品"))
+                return
+
+            logging.info("成功獲取數據，開始分析...")
+
+            # 2. 預先處理要顯示的資料 (包含製作判定)
+            display_data = []
+            
+            # 取得目前的伺服器設定
+            current_server = self.server_var.get()
+
+            for item in results:
+                item_id = item.get('id')
+                item_name = item.get('name')
+                
+                # 在背景執行緒中預先計算 Crafting 狀態
+                # 這樣就不會卡住 UI
+                crafting_info = self.crafting_service.get_crafting_data(item_id, current_server)
+                
+                # 您的日誌在這裡被觸發
+                logging.debug(f"CRAFTING_RESULT: {crafting_info.get('status')}")
+                
+                # 判斷顯示文字
+                craft_status_text = "❌ 無法製作"
+                if crafting_info.get('status') != 'no_recipe':
+                    craft_status_text = "🔨 可製作"
+
+                # 將整理好的數據存入列表
+                # 這裡只存數據，不呼叫 tree.insert
+                display_data.append({
+                    'id': item_id,
+                    'name': item_name,
+                    'craft_status': craft_status_text,
+                    'price_info': item.get('price_info', '---') # 假設有這欄位
+                })
+
+            # 3. 數據處理完成，呼叫主執行緒更新 UI
+            # 使用 self.after(0, ...) 將控制權交還給主執行緒
+            self.after(0, lambda: self._update_search_ui(display_data))
+
+        except Exception as e:
+            logging.error(f"搜尋發生錯誤: {e}")
+            self.after(0, lambda: self._search_finished([], f"錯誤: {e}"))
+
+    def _update_search_ui(self, display_data):
+        """
+        [主執行緒] 負責接收數據並更新 Treeview
+        """
+        try:
+            # 再次確保清空 (以防萬一)
+            self.scan_tree.delete(*self.scan_tree.get_children())
+
+            if not display_data:
+                self.status_label.configure(text="無結果")
+            else:
+                self.status_label.configure(text=f"找到 {len(display_data)} 筆結果")
+
+            # 安全地更新 UI
+            for data in display_data:
+                self.scan_tree.insert(
+                    "", 
+                    "end", 
+                    values=(
+                        data['id'], 
+                        data['name'], 
+                        data['craft_status'],
+                        data['price_info']
+                    )
+                )
+                
+            self.append_log(f"搜尋完成，更新 {len(display_data)} 筆資料。")
+            
+        except Exception as e:
+            logging.error(f"UI 更新失敗: {e}")
+        finally:
+            # 恢復按鈕狀態
+            self.btn_search.configure(state="normal")
+
+    def _search_finished(self, results, msg):
+        """
+        錯誤或空結果的簡單回調
+        """
+        self.status_label.configure(text=msg)
+        self.btn_search.configure(state="normal")
+
+# ... existing code ...
