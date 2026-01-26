@@ -1621,6 +1621,10 @@ class FF14MarketApp(ctk.CTk):
         # Initialize Menu
         self.update_scanner_cat_menu()
         
+        # Refresh Categories Button
+        self.btn_refresh_cat = ctk.CTkButton(ctrl_frame, text="🔄", width=30, command=self.refresh_scanner_source, fg_color="gray")
+        self.btn_refresh_cat.pack(side="left", padx=(0, 20))
+        
         # Time Slider
         slider_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         slider_frame.pack(side="left", padx=20)
@@ -1685,6 +1689,16 @@ class FF14MarketApp(ctk.CTk):
         
         # Double click to jump
         self.scan_tree.bind("<Double-1>", self.on_scan_result_click)
+
+    def refresh_scanner_source(self):
+        """Manually refresh the category dropdown in scanner tab."""
+        self.update_scanner_cat_menu()
+        self.status_bar.configure(text="掃描來源清單已刷新", text_color="#2CC985") # Green
+        
+        # Flash button color
+        original_color = "gray" # Default set in setup
+        self.btn_refresh_cat.configure(fg_color="#2CC985") # Success green
+        self.after(500, lambda: self.btn_refresh_cat.configure(fg_color=original_color))
 
     def update_scanner_cat_menu(self):
         cats = self.db.get_categories()
