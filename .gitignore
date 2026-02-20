@@ -25,3 +25,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.agent/
+
+# Logs
+*.log

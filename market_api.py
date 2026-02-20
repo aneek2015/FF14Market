@@ -73,18 +73,25 @@ class MarketAPI:
         """
         Fetches 'most-recently-updated' item IDs from Universalis.
         Server can be World or DC.
+        Returns: list of integer item IDs
         """
-        # Universalis endpoint: /api/v2/extra/stats/most-recently-updated?world=WorldName&entries=50
-        # Or /api/v2/extra/stats/most-recently-updated?dcName=DCName&entries=50
-        # Note: Universalis documentation varies. The practical endpoint is often used.
-        # Let's try the common endpoint structure.
         url = f"https://universalis.app/api/v2/extra/stats/most-recently-updated?world={server}&entries={entries}"
         try:
             resp = self.session.get(url, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                # Returns: {"items": [id1, id2, ...]}
-                return data.get("items", [])
+                raw_items = data.get("items", [])
+                
+                # API 回傳格式可能是：
+                # 1. 純 ID 列表: [12345, 67890, ...]
+                # 2. 物件列表: [{"itemID": 12345, "lastUploadTime": ...}, ...]
+                if raw_items and isinstance(raw_items[0], dict):
+                    item_ids = [item.get("itemID") for item in raw_items if item.get("itemID")]
+                    logging.info(f"從物件列表中解析出 {len(item_ids)} 個物品 ID")
+                else:
+                    item_ids = raw_items
+                
+                return item_ids
             else:
                 logging.error(f"Recently updated fetch failed: {resp.status_code}")
                 return []
@@ -135,6 +142,105 @@ class MarketAPI:
                 continue # Move to the next batch
 
         return all_items_data, 200
+
+    def fetch_hot_items(self, server, sample_size=200, analysis_hours=24, progress_callback=None):
+        """
+        市場熱賣掃描策略：
+        1. 取得最近被更新的物品 ID（活躍交易指標）
+        2. 批量查詢市場資料
+        3. 過濾垃圾物品 + 計算銷售速度
+        4. 回傳排序後的結果清單
+
+        Args:
+            server: 伺服器名稱
+            sample_size: 取樣數量（最近更新物品數）
+            analysis_hours: 分析時間範圍（小時）
+            progress_callback: 進度回呼 fn(float 0~1)
+
+        Returns:
+            (results_list, error_msg) - results 按銷售速度降序排列
+        """
+        try:
+            # Step 1: 取得最近被更新的物品 ID
+            if progress_callback:
+                progress_callback(0.1)
+            logging.info(f"[市場熱賣] 正在取得最近 {sample_size} 個活躍物品 ID...")
+            
+            item_ids = self.fetch_recently_updated_items(server, entries=sample_size)
+            
+            if not item_ids:
+                return [], "無法取得最近更新的物品清單，請確認伺服器名稱是否正確"
+            
+            logging.info(f"[市場熱賣] 取得 {len(item_ids)} 個物品 ID，開始批量查詢市場資料...")
+            if progress_callback:
+                progress_callback(0.2)
+            
+            # Step 2: 批量查詢市場資料
+            data_map, status = self.fetch_market_data_batch(server, item_ids)
+            
+            if status != 200 or not data_map:
+                return [], f"批量查詢失敗 (HTTP {status})"
+            
+            logging.info(f"[市場熱賣] 收到 {len(data_map)} 筆市場資料，開始分析...")
+            if progress_callback:
+                progress_callback(0.7)
+            
+            # Step 3: 過濾 + 計算銷售速度
+            results = []
+            raw_list = list(data_map.values())
+            cleaned_list = DataAnalyzer.clean_market_data(raw_list, min_price_threshold=300)
+            
+            for item_data in cleaned_list:
+                item_id = item_data.get("itemID")
+                history = item_data.get("recentHistory", [])
+                
+                # 計算指定時間內的銷售數量
+                sold_count, _ = DataAnalyzer.calculate_velocity_in_timeframe(history, analysis_hours)
+                
+                # 計算日均銷售速度
+                if analysis_hours >= 24:
+                    heat_val = sold_count / (analysis_hours / 24.0)
+                else:
+                    heat_val = sold_count  # 小時級別直接顯示數量
+                
+                # 跳過完全沒銷售的物品
+                if sold_count == 0:
+                    continue
+                
+                # 取得價格資訊
+                min_price = item_data.get("minPrice", 0)
+                listings = item_data.get("listings", [])
+                current_stock = len(listings)
+                avg_price = int(sum(l["pricePerUnit"] for l in listings) / current_stock) if current_stock else 0
+                
+                # 計算交易筆數（用於排名參考）
+                now_ts = datetime.now().timestamp()
+                cutoff = now_ts - (analysis_hours * 3600)
+                tx_count = len([h for h in history if h.get("timestamp", 0) > cutoff])
+                
+                results.append({
+                    "id": item_id,
+                    "name": str(item_id),  # 稍後由 UI 層替換為中文名
+                    "heat": heat_val,       # 銷售速度（個/日 or 個/Nh）
+                    "sold": sold_count,     # 時段內總銷售數
+                    "tx_count": tx_count,   # 交易筆數
+                    "avg": avg_price,       # 當前掛單均價
+                    "min": min_price,       # 最低價
+                    "stock": current_stock  # 庫存數
+                })
+            
+            # Step 4: 排序（銷售速度降序，同速度按交易筆數降序）
+            results.sort(key=lambda x: (x["heat"], x["tx_count"]), reverse=True)
+            
+            if progress_callback:
+                progress_callback(1.0)
+            
+            logging.info(f"[市場熱賣] 分析完成，有效熱賣物品: {len(results)} 個")
+            return results, None
+            
+        except Exception as e:
+            logging.exception("[市場熱賣] 掃描失敗")
+            return [], f"掃描發生錯誤: {str(e)}"
 
 
 class DataAnalyzer:
@@ -313,13 +419,12 @@ class DataAnalyzer:
                     sniping_profit = total_snipe_profit
                     sniping_cost = total_cost
         
-        # --- 8. Stack Optimization ---
-        small_stack_sales = [h['pricePerUnit'] for h in valid_history if 1 <= h['quantity'] <= 5]
-        large_stack_sales = [h['pricePerUnit'] for h in valid_history if h['quantity'] >= 99]
-        avg_small = sum(small_stack_sales)/len(small_stack_sales) if small_stack_sales else 0
-        avg_large = sum(large_stack_sales)/len(large_stack_sales) if large_stack_sales else 0
-        stack_diff = avg_small - avg_large if (avg_small > 0 and avg_large > 0) else 0
-
+        # --- 8. Stack Sales Data (Popularity) ---
+        # Replacing old optimization with top 3 popular stack sizes
+        from collections import Counter
+        stack_counts = Counter(h['quantity'] for h in valid_history)
+        top_stacks = stack_counts.most_common(3) # [(qty, count), ...]
+        
         return {
             "velocity": velocity_items,
             "velocity_tx": velocity_tx,
@@ -336,7 +441,7 @@ class DataAnalyzer:
             "days_to_sell": days_to_sell,
             "stock_total": effective_stock,
             "total_stock_raw": sum(l.get("quantity", 0) for l in listings),
-            "stack_diff": stack_diff,
+            "stack_popularity": top_stacks, # New field
             "merged_listings": listings,
             "merged_history": history
         }

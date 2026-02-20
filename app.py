@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import threading
 import webbrowser
+import gc # [Optimization] For manual garbage collection
 from datetime import datetime
 import logging
 import time 
@@ -99,6 +100,12 @@ class FF14MarketApp(ctk.CTk):
             self.selected_dc = "尚未設定伺服器"
             
         self.recent_history = []
+        
+        # [Hot Items] 快取變數
+        self.hot_items_cache = []        # 快取的掃描結果
+        self.hot_items_cache_time = 0    # 快取時間戳
+        self.hot_items_cache_ttl = 300   # 快取有效期（秒）= 5 分鐘
+        self.hot_items_cache_params = {} # 快取時的參數 (hours, sample_size)
 
         # 設定表格樣式
         self.setup_treeview_style()
@@ -156,13 +163,15 @@ class FF14MarketApp(ctk.CTk):
         self.tabview.add("市場概況")
         self.tabview.add("製作計算") 
         self.tabview.add("歷史數據")
+        self.tabview.add("🔥 市場熱賣")
         self.tabview.add("⭐ 我的最愛掃描")
         
         # Setup Tabs
         self.setup_tab_overview()
         self.setup_tab_crafting()
         self.setup_tab_history()
-        self.setup_tab_scanner() # [New]
+        self.setup_tab_hot_items()  # [New] 市場熱賣
+        self.setup_tab_scanner()
 
         # 底部狀態列
         self.status_bar = ctk.CTkLabel(self.main_frame, text="系統就緒 | 資料庫已連接", anchor="w", text_color="gray")
@@ -486,13 +495,15 @@ class FF14MarketApp(ctk.CTk):
             self.vocabulary_map = self.db.get_all_vocabulary()
             
             # [Fix] Update Reverse Map as well
+            # [Fix] Update Reverse Map as well
             self.vocabulary_reverse_map = {v: k for k, v in self.vocabulary_map.items()}
             
             sorted_vocab = sorted(self.vocabulary_map.items())
             for orig, corr in sorted_vocab:
                 tree.insert("", "end", values=(orig, corr))
-            if self.current_item_id:
-                self.refresh_ui_from_cache()
+            # [Fix] Do NOT refresh UI here. It causes full reload on window open.
+            # if self.current_item_id:
+            #     self.refresh_ui_from_cache()
 
         def on_select(event):
             selected_item = tree.focus()
@@ -727,6 +738,9 @@ class FF14MarketApp(ctk.CTk):
                 if self.current_data:
                     self.refresh_ui_from_cache()
 
+                # [New] Update Dashboard Labels
+                self.update_overview_labels()
+
             except ValueError:
                 messagebox.showerror("錯誤", "請輸入有效的數字", parent=window)
 
@@ -748,15 +762,18 @@ class FF14MarketApp(ctk.CTk):
         self.analysis_frame.grid(row=0, column=0, sticky="ew", pady=(10, 10), padx=5)
         self.analysis_frame.grid_columnconfigure((0,1,2,3), weight=1)
         
-        self.stat_velocity = self.create_stat_card(0, 0, "銷售速度 (個/筆)", "--")
-        self.stat_avg_price = self.create_stat_card(0, 1, "近期平均成交價", "--")
-        self.stat_days_to_sell = self.create_stat_card(0, 2, "去化天數 (有效庫存)", "--")
-        self.stat_stock = self.create_stat_card(0, 3, "庫存 (有效/總量)", "--")
+        self.lbl_velocity_title, self.stat_velocity = self.create_stat_card(0, 0, "銷售速度", "--")
+        self.lbl_avg_price_title, self.stat_avg_price = self.create_stat_card(0, 1, "近期平均成交價", "--")
+        _, self.stat_days_to_sell = self.create_stat_card(0, 2, "去化天數 (有效庫存)", "--")
+        _, self.stat_stock = self.create_stat_card(0, 3, "庫存 (有效/總量)", "--")
         
-        self.stat_profit = self.create_stat_card(1, 0, "預期營收 (實拿)", "--")
-        self.stat_arbitrage = self.create_stat_card(1, 1, "跨服價差 (套利)", "--")
-        self.stat_sniping = self.create_stat_card(1, 2, "狙擊缺口 (價差)", "--")
-        self.stat_stack_opt = self.create_stat_card(1, 3, "拆包獲利 (堆疊)", "--")
+        _, self.stat_profit = self.create_stat_card(1, 0, "預期營收 (實拿)", "--")
+        _, self.stat_arbitrage = self.create_stat_card(1, 1, "跨服價差 (套利)", "--")
+        _, self.stat_sniping = self.create_stat_card(1, 2, "狙擊缺口 (價差)", "--")
+        _, self.stat_stack_opt = self.create_stat_card(1, 3, "拆售數據 (熱門堆疊)", "--")
+        
+        # Initial Label Update
+        self.update_overview_labels()
 
         # 販售列表
         self.listings_container = ctk.CTkFrame(tab, corner_radius=0, fg_color="transparent")
@@ -794,7 +811,17 @@ class FF14MarketApp(ctk.CTk):
         self.history_container = ctk.CTkFrame(tab, corner_radius=0, fg_color="transparent")
         self.history_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=10)
 
-        ctk.CTkLabel(self.history_container, text="近期交易 (History - Top 500)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(0, 5))
+        # [New] Controls Frame
+        ctrl_frame = ctk.CTkFrame(self.history_container, fg_color="transparent")
+        ctrl_frame.pack(fill="x", pady=(0, 5))
+
+        ctk.CTkLabel(ctrl_frame, text="近期交易 (History - Top 500)", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        
+        self.history_sort_var = ctk.StringVar(value="依時間排序")
+        self.hist_sort_btn = ctk.CTkSegmentedButton(ctrl_frame, values=["依時間排序", "依堆疊熱門度"],
+                                                    variable=self.history_sort_var,
+                                                    command=self.refresh_history_ui)
+        self.hist_sort_btn.pack(side="right") # Pack right aligned
 
         h_cols = ("單價", "數量", "交易時間")
         self.history_tree = ttk.Treeview(self.history_container, columns=h_cols, show='headings', selectmode='browse')
@@ -832,7 +859,19 @@ class FF14MarketApp(ctk.CTk):
         lbl_title.pack()
         lbl_value = ctk.CTkLabel(frame, text=value, font=ctk.CTkFont(size=18, weight="bold"), text_color="#4da6ff")
         lbl_value.pack()
-        return lbl_value
+        return lbl_title, lbl_value
+
+    def update_overview_labels(self):
+        """Updates the labels in the Analysis Dashboard based on current config."""
+        v_days = self.config.get("velocity_days", 7)
+        avg_entries = self.config.get("avg_price_entries", 20)
+        avg_days = self.config.get("avg_price_days_limit", 30)
+        
+        if hasattr(self, 'lbl_velocity_title'):
+             self.lbl_velocity_title.configure(text=f"銷售速度 ({v_days}天)")
+             
+        if hasattr(self, 'lbl_avg_price_title'):
+             self.lbl_avg_price_title.configure(text=f"近期平均成交價 ({avg_entries}筆/{avg_days}天)")
 
     def toggle_favorite(self):
         try:
@@ -1189,6 +1228,13 @@ class FF14MarketApp(ctk.CTk):
 
         if self.is_loading: return
 
+        # [New] 自訂詞彙反向搜尋轉換
+        if raw_input in self.vocabulary_reverse_map:
+            original_term = self.vocabulary_reverse_map[raw_input]
+            logging.info(f"偵測到自訂詞彙: '{raw_input}' -> 自動轉換為原始名稱: '{original_term}'")
+            self.status_bar.configure(text=f"自訂詞彙轉換: {raw_input} -> {original_term}")
+            raw_input = original_term
+
         # 呼叫新的多執行緒搜尋
         self.search_item_thread(raw_input)
 
@@ -1430,6 +1476,10 @@ class FF14MarketApp(ctk.CTk):
         if not self.is_loading:
             return
 
+        # [Optimization] Stop if window is destroyed or loading finished
+        if not self.winfo_exists():
+            return
+
         if self.progress_val < 0.3:
             step = 0.05
         elif self.progress_val < 0.6:
@@ -1547,10 +1597,20 @@ class FF14MarketApp(ctk.CTk):
                 
             self.stat_sniping.configure(text=snipe_text, text_color=snipe_color)
 
-            stack_val = analysis.get("stack_diff", 0)
-            stack_color = "#66FF66" if stack_val > 0 else "gray"
-            stack_str = f"差價 {int(stack_val):+,}" if stack_val != 0 else "無顯著差異"
-            self.stat_stack_opt.configure(text=stack_str, text_color=stack_color)
+            stack_data = analysis.get("stack_popularity", [])
+            if stack_data:
+                # Format: List of (qty, count)
+                # Display top 3
+                lines = []
+                for i, (qty, count) in enumerate(stack_data[:3]):
+                    lines.append(f"#{i+1}: 堆疊{qty} ({count}筆)")
+                stack_str = "\n".join(lines)
+                stack_color = "#66FF66" # Green
+            else:
+                stack_str = "無數據"
+                stack_color = "gray"
+
+            self.stat_stack_opt.configure(text=stack_str, text_color=stack_color, font=ctk.CTkFont(size=14)) # Smaller font for multi-line
 
         listings = analysis.get("merged_listings", []) if analysis else []
         avg_price = analysis['avg_sale_price'] if analysis else 0
@@ -1582,8 +1642,43 @@ class FF14MarketApp(ctk.CTk):
         for i, item in enumerate(self.listings_tree.get_children()):
             self.listings_tree.set(item, "#", str(i+1))
 
-        history = analysis.get("merged_history", []) if analysis else []
-        for entry in history[:40]:
+        for i, item in enumerate(self.listings_tree.get_children()):
+            self.listings_tree.set(item, "#", str(i+1))
+
+        # [Modified] Call refresh_history_ui instead of direct populate
+        self.refresh_history_ui()
+
+        self.status_bar.configure(text=f"資料更新成功: {datetime.now().strftime('%H:%M:%S')}", text_color="#2CC985")
+
+    def refresh_history_ui(self, value=None):
+        """Refreshes the History tab based on current sort method."""
+        # Check if we have analysis data
+        if not self.current_analysis:
+            return
+
+        # Clear current items
+        self.history_tree.delete(*self.history_tree.get_children())
+        
+        history = self.current_analysis.get("merged_history", [])
+        if not history:
+            return
+
+        sort_mode = self.history_sort_var.get()
+        
+        # [Sorting Logic]
+        if sort_mode == "依堆疊熱門度":
+            from collections import Counter
+            # 1. Calculate frequency of each quantity
+            stack_counts = Counter(h['quantity'] for h in history)
+            # 2. Sort by: Frequency DESC, Quantity DESC, Time DESC
+            sorted_history = sorted(history, key=lambda x: (stack_counts[x['quantity']], x['quantity'], x['timestamp']), reverse=True)
+        else:
+            # Default: Time descending (already sorted usually, but ensure it)
+            sorted_history = sorted(history, key=lambda x: x['timestamp'], reverse=True)
+            
+        # [Display]
+        # Limit to top 200 for performance if list is huge, though 500 should be fine
+        for entry in sorted_history[:500]:
             price = entry.get("pricePerUnit", 0)
             qty = entry.get("quantity", 0)
             ts = entry.get("timestamp", 0)
@@ -1593,13 +1688,281 @@ class FF14MarketApp(ctk.CTk):
             
             self.history_tree.insert("", "end", values=(f"{price:,} {hq_mark}", str(qty), date_str))
 
-        self.status_bar.configure(text=f"資料更新成功: {datetime.now().strftime('%H:%M:%S')}", text_color="#2CC985")
-
     def open_in_browser(self):
         if self.current_item_id:
             webbrowser.open(f"https://universalis.app/market/{self.current_item_id}")
         else:
             webbrowser.open("https://universalis.app/")
+
+# --- 🔥 市場熱賣 (Tab) ---
+    def setup_tab_hot_items(self):
+        tab = self.tabview.tab("🔥 市場熱賣")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        # 1. 控制列
+        ctrl_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        ctrl_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+
+        ctk.CTkLabel(ctrl_frame, text="分析時段:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(10, 5))
+
+        # 時間範圍下拉選單
+        self.hot_time_var = ctk.StringVar(value="過去 24 小時")
+        time_options = ["過去 24 小時", "過去 48 小時", "過去 72 小時", "過去 7 天"]
+        self.hot_time_menu = ctk.CTkComboBox(ctrl_frame, width=160, variable=self.hot_time_var, values=time_options, state="readonly")
+        self.hot_time_menu.pack(side="left", padx=5)
+
+        # 取樣範圍下拉選單
+        ctk.CTkLabel(ctrl_frame, text="取樣範圍:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(15, 5))
+        self.hot_sample_var = ctk.StringVar(value="200 個 (4批)")
+        sample_options = ["100 個 (2批)", "200 個 (4批)", "300 個 (6批)", "400 個 (8批)"]
+        self.hot_sample_menu = ctk.CTkComboBox(ctrl_frame, width=150, variable=self.hot_sample_var, values=sample_options, state="readonly")
+        self.hot_sample_menu.pack(side="left", padx=5)
+
+        # 掃描按鈕
+        self.btn_hot_scan = ctk.CTkButton(
+            ctrl_frame, text="🔍 開始掃描", 
+            command=self.start_hot_scan_thread,
+            fg_color="#E04F5F", hover_color="#C03A48", width=130
+        )
+        self.btn_hot_scan.pack(side="left", padx=15)
+
+        # 清除快取按鈕
+        self.btn_hot_clear = ctk.CTkButton(
+            ctrl_frame, text="🗑️ 清除快取",
+            command=self.clear_hot_cache,
+            fg_color="gray", hover_color="#555", width=100
+        )
+        self.btn_hot_clear.pack(side="left", padx=5)
+
+        # 快取狀態標籤
+        self.lbl_hot_status = ctk.CTkLabel(ctrl_frame, text="尚未掃描", text_color="gray", font=ctk.CTkFont(size=13))
+        self.lbl_hot_status.pack(side="right", padx=10)
+
+        # 進度條
+        self.hot_progress = ctk.CTkProgressBar(ctrl_frame, height=5)
+        self.hot_progress.set(0)
+
+        # 2. 結果表格
+        res_frame = ctk.CTkFrame(tab)
+        res_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        res_frame.grid_columnconfigure(0, weight=1)
+        res_frame.grid_rowconfigure(0, weight=1)
+
+        cols = ("排名", "品名", "銷售速度", "時段銷售", "均價", "最低價", "庫存")
+        self.hot_tree = ttk.Treeview(res_frame, columns=cols, show="headings")
+        self.hot_tree.heading("排名", text="#")
+        self.hot_tree.heading("品名", text="品名")
+        self.hot_tree.heading("銷售速度", text="銷售速度")
+        self.hot_tree.heading("時段銷售", text="時段銷售")
+        self.hot_tree.heading("均價", text="均價")
+        self.hot_tree.heading("最低價", text="最低價")
+        self.hot_tree.heading("庫存", text="庫存")
+
+        self.hot_tree.column("排名", width=50, anchor="center")
+        self.hot_tree.column("品名", width=280)
+        self.hot_tree.column("銷售速度", width=120, anchor="center")
+        self.hot_tree.column("時段銷售", width=100, anchor="center")
+        self.hot_tree.column("均價", width=100, anchor="e")
+        self.hot_tree.column("最低價", width=100, anchor="e")
+        self.hot_tree.column("庫存", width=70, anchor="center")
+
+        self.hot_tree.grid(row=0, column=0, sticky="nsew")
+
+        scroll = ctk.CTkScrollbar(res_frame, command=self.hot_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.hot_tree.configure(yscrollcommand=scroll.set)
+
+        # 雙擊跳轉
+        self.hot_tree.bind("<Double-1>", self.on_hot_result_click)
+
+        # 底部提示
+        tip_label = ctk.CTkLabel(tab, text="💡 提示：資料來源為 Universalis 最近活躍物品，結合銷售速度排序。雙擊可查看詳情。", 
+                                 text_color="gray", font=ctk.CTkFont(size=12))
+        tip_label.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 5))
+
+    def _get_hot_hours(self):
+        """從下拉選單解析分析時段（小時數）"""
+        time_str = self.hot_time_var.get()
+        mapping = {
+            "過去 24 小時": 24,
+            "過去 48 小時": 48,
+            "過去 72 小時": 72,
+            "過去 7 天": 168
+        }
+        return mapping.get(time_str, 24)
+
+    def _get_hot_sample_size(self):
+        """從下拉選單解析取樣數量"""
+        sample_str = self.hot_sample_var.get()
+        mapping = {
+            "100 個 (2批)": 100,
+            "200 個 (4批)": 200,
+            "300 個 (6批)": 300,
+            "400 個 (8批)": 400
+        }
+        return mapping.get(sample_str, 200)
+
+    def clear_hot_cache(self):
+        """清除熱賣掃描快取"""
+        self.hot_items_cache = []
+        self.hot_items_cache_time = 0
+        self.hot_tree.delete(*self.hot_tree.get_children())
+        self.lbl_hot_status.configure(text="快取已清除", text_color="#FFD700")
+        self.after(2000, lambda: self.lbl_hot_status.configure(text="尚未掃描", text_color="gray"))
+
+    def start_hot_scan_thread(self):
+        """啟動市場熱賣掃描（執行緒安全）"""
+        server = self.dc_option_menu.get()
+        if not server or server == "請先新增伺服器":
+            messagebox.showwarning("提示", "請先選擇伺服器")
+            return
+
+        hours = self._get_hot_hours()
+        sample_size = self._get_hot_sample_size()
+        current_params = {"hours": hours, "sample_size": sample_size}
+
+        # 檢查快取（參數一致且未過期才使用）
+        now = time.time()
+        if (self.hot_items_cache 
+            and (now - self.hot_items_cache_time) < self.hot_items_cache_ttl
+            and self.hot_items_cache_params == current_params):
+            remaining = int(self.hot_items_cache_ttl - (now - self.hot_items_cache_time))
+            self.append_log(f"[市場熱賣] 使用快取資料 (剩餘 {remaining} 秒有效)")
+            self.finish_hot_scan(self.hot_items_cache, None, from_cache=True)
+            return
+
+        # 禁用按鈕
+        self.btn_hot_scan.configure(state="disabled", text="掃描中...")
+        self.hot_progress.pack(side="bottom", fill="x", pady=5)
+        self.hot_progress.set(0)
+        self.lbl_hot_status.configure(text="正在掃描...", text_color="yellow")
+
+        threading.Thread(target=self.run_hot_scan, args=(server, hours), daemon=True).start()
+
+    def run_hot_scan(self, server, hours):
+        """[背景執行緒] 執行市場熱賣掃描"""
+        def progress_cb(val):
+            self.after(0, lambda v=val: self.hot_progress.set(v))
+
+        sample_size = self._get_hot_sample_size()
+        results, error = self.api.fetch_hot_items(
+            server=server,
+            sample_size=sample_size,
+            analysis_hours=hours,
+            progress_callback=progress_cb
+        )
+
+        if not error:
+            # 替換 Item ID 為中文名稱
+            for r in results:
+                name = self.db.get_item_name_by_id(r["id"])
+                if name:
+                    r["name"] = self.translate_term(name)
+                else:
+                    r["name"] = f"[ID: {r['id']}]"
+
+        self.after(0, lambda: self.finish_hot_scan(results, error))
+
+    def finish_hot_scan(self, results, error, from_cache=False):
+        """[主執行緒] 更新市場熱賣結果 UI"""
+        # 恢復按鈕狀態
+        self.btn_hot_scan.configure(state="normal", text="🔍 開始掃描")
+        self.hot_progress.pack_forget()
+
+        if error:
+            messagebox.showerror("掃描錯誤", error)
+            self.lbl_hot_status.configure(text=f"掃描失敗", text_color="red")
+            return
+
+        # 更新快取
+        if not from_cache:
+            self.hot_items_cache = results
+            self.hot_items_cache_time = time.time()
+            self.hot_items_cache_params = {
+                "hours": self._get_hot_hours(),
+                "sample_size": self._get_hot_sample_size()
+            }
+
+        # 清空表格
+        self.hot_tree.delete(*self.hot_tree.get_children())
+
+        # 取 Top 20
+        top_results = results[:20]
+        hours = self._get_hot_hours()
+
+        # 更新表頭
+        if hours >= 24:
+            unit_label = "個/日"
+        else:
+            unit_label = f"個/{hours}h"
+        self.hot_tree.heading("銷售速度", text=f"銷售速度 ({unit_label})")
+        self.hot_tree.heading("時段銷售", text=f"時段銷售 ({hours}h)")
+
+        for i, r in enumerate(top_results):
+            heat_str = f"{r['heat']:.1f}" if hours >= 24 else f"{int(r['heat'])}"
+            self.hot_tree.insert("", "end", values=(
+                f"#{i+1}",
+                r["name"],
+                heat_str,
+                f"{r['sold']}",
+                f"{int(r['avg']):,}",
+                f"{int(r['min']):,}",
+                f"{r['stock']:,}"
+            ))
+
+        # 儲存原始結果供雙擊使用
+        self.last_hot_results = top_results
+
+        # 更新狀態
+        cache_time_str = datetime.now().strftime('%H:%M:%S')
+        if from_cache:
+            self.lbl_hot_status.configure(text=f"快取資料 | {cache_time_str}", text_color="#4da6ff")
+        else:
+            self.lbl_hot_status.configure(text=f"掃描完成 | {cache_time_str} | 共分析 {len(results)} 個物品", text_color="#2CC985")
+
+        self.append_log(f"[市場熱賣] 顯示 Top {len(top_results)} 熱賣物品 (共 {len(results)} 個有效物品)")
+
+    def on_hot_result_click(self, event):
+        """雙擊熱賣結果 → 跳轉至市場概況並查詢"""
+        item = self.hot_tree.selection()
+        if not item:
+            return
+
+        idx = self.hot_tree.index(item)
+        if hasattr(self, 'last_hot_results') and idx < len(self.last_hot_results):
+            data = self.last_hot_results[idx]
+            item_id = data['id']
+            item_name = data['name']
+
+            # 更新當前上下文
+            self.current_item_id = item_id
+            self.current_item_name = item_name
+
+            display_name = self.translate_term(item_name)
+            self.update_title(display_name, item_id)
+
+            # 跳轉至市場概況分頁
+            self.tabview.set("市場概況")
+
+            # 更新搜尋欄
+            self.search_entry.delete(0, "end")
+            self.search_entry.insert(0, str(item_id))
+
+            # 開始載入資料
+            if self.is_loading:
+                return
+            self.is_loading = True
+
+            self.status_bar.configure(text=f"正在載入 {display_name} ...", text_color="yellow")
+
+            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
+
+            if hasattr(self, 'lbl_craft_status'):
+                self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
+
+            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
+
 # --- Hot Item Scanner (Tab) ---
     def setup_tab_scanner(self):
         tab = self.tabview.tab("⭐ 我的最愛掃描")
@@ -1612,7 +1975,7 @@ class FF14MarketApp(ctk.CTk):
         
         # Source Label
         ctk.CTkLabel(ctrl_frame, text="掃描範圍:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(10, 5))
-        
+
         # Category Dropdown
         self.scan_cat_var = ctk.StringVar(value="全部 (All)")
         self.scan_cat_menu = ctk.CTkComboBox(ctrl_frame, width=150, variable=self.scan_cat_var)
@@ -1647,9 +2010,9 @@ class FF14MarketApp(ctk.CTk):
         slider.pack()
         
         # Batch Checkbox
-        self.batch_scan_var = ctk.BooleanVar(value=True) # Default On for speed? User asked if it CAN be done. Let's default False as per plan? User said "batch search... add it". I'll default to False for safety, user can tick.
-        # Actually plan said Default False.
-        self.batch_scan_var.set(False)
+        # Batch Checkbox
+        self.batch_scan_var = ctk.BooleanVar(value=True) 
+        self.batch_scan_var.set(True) # Default On
         self.chk_batch = ctk.CTkCheckBox(ctrl_frame, text="⚡ 批次快速掃描", variable=self.batch_scan_var)
         self.chk_batch.pack(side="left", padx=10)
         
