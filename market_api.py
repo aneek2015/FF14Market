@@ -504,28 +504,6 @@ class DataAnalyzer:
         return cleaned
 
     @staticmethod
-    def clean_market_data(data_list, min_price_threshold=300):
-        """
-        Filters out 'garbage' items from a list of market data objects.
-        Criteria:
-        1. Min Price < Threshold (e.g. 300 gil) -> likely trash/dye/junk
-        2. No Listings -> dead item
-        """
-        cleaned = []
-        for item_data in data_list:
-            listings = item_data.get("listings", [])
-            if not listings:
-                continue
-            
-            # Check Min Price
-            min_price = listings[0].get("pricePerUnit", 0)
-            if min_price < min_price_threshold:
-                continue
-                
-            cleaned.append(item_data)
-        return cleaned
-
-    @staticmethod
     def calculate_velocity_in_timeframe(history, hours=24):
         """
         Calculates sales count within the last N hours.

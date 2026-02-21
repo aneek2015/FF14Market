@@ -186,27 +186,22 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Failed to save setting {key}: {e}")
 
-    # --- Favorites & Categories ---
-    def get_favorites(self, category_id=None):
-        """Returns list of (id, name, category_id). Optionally filtered by category."""
+    # --- Categories ---
+    def get_categories(self):
+        """Returns list of (id, name)."""
         try:
             with self.get_connection() as conn:
                 c = conn.cursor()
-                if category_id:
-                     c.execute("SELECT id, name, category_id FROM favorites WHERE category_id = ?", (category_id,))
-                else:
-                     c.execute("SELECT id, name, category_id FROM favorites")
+                c.execute("SELECT id, name FROM categories ORDER BY id")
                 return c.fetchall()
-        except Exception as e:
-            logging.error(f"Get favorites failed: {e}")
-            return []
-            
-    def get_categories(self):
+        except Exception: return []
+
+    def get_categories_dict(self):
         """Returns dict {id: name} of all categories."""
         try:
             with self.get_connection() as conn:
                 c = conn.cursor()
-                c.execute("SELECT id, name FROM categories")
+                c.execute("SELECT id, name FROM categories ORDER BY id")
                 return dict(c.fetchall())
         except Exception:
             return {}
@@ -218,8 +213,52 @@ class DatabaseManager:
                 c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
                 conn.commit()
             return True
-        except Exception:
-            return False
+        except Exception: return False
+
+    def delete_category(self, cat_id):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                # Move items to "Uncategorized" (ID 1) before deleting
+                c.execute("UPDATE favorites SET category_id = 1 WHERE category_id = ?", (cat_id,))
+                c.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+                conn.commit()
+            return True
+        except Exception: return False
+    
+    def rename_category(self, cat_id, new_name):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("UPDATE categories SET name = ? WHERE id = ?", (new_name, cat_id))
+                conn.commit()
+            return True
+        except Exception: return False
+
+    # --- Favorites ---
+    def get_favorites(self, category_id=None):
+        """Returns list of (id, name, category_id). Optionally filtered by category."""
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                if category_id:
+                     c.execute("SELECT id, name, category_id FROM favorites WHERE category_id = ? ORDER BY name", (category_id,))
+                else:
+                     c.execute("SELECT id, name, category_id FROM favorites ORDER BY name")
+                return c.fetchall()
+        except Exception as e:
+            logging.error(f"Get favorites failed: {e}")
+            return []
+
+    def add_favorite(self, item_id, item_name, category_id=1):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                # Upsert
+                c.execute("INSERT OR REPLACE INTO favorites (id, name, category_id) VALUES (?, ?, ?)", (item_id, item_name, category_id))
+                conn.commit()
+            return True
+        except Exception: return False
 
     def update_favorite_category(self, item_id, category_id):
         try:
@@ -250,24 +289,14 @@ class DatabaseManager:
                 c = conn.cursor()
                 c.execute("SELECT 1 FROM favorites WHERE id = ?", (item_id,))
                 return c.fetchone() is not None
-        except Exception:
-            return False
+        except Exception: return False
 
     def toggle_favorite(self, item_id, item_name):
         """Toggles favorite status. Default category is 1 (Uncategorized or First one)."""
         if self.is_favorite(item_id):
             return self.remove_favorite(item_id)
         else:
-            try:
-                with self.get_connection() as conn:
-                    c = conn.cursor()
-                    # Default to category_id 1
-                    c.execute("INSERT INTO favorites (id, name, category_id) VALUES (?, ?, 1)", (item_id, item_name))
-                    conn.commit()
-                return True
-            except Exception as e:
-                logging.error(f"Add favorite failed: {e}")
-                return False
+            return self.add_favorite(item_id, item_name, 1)
                 
     # --- Servers ---
     def get_custom_servers(self):
@@ -400,82 +429,6 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Import JSON failed: {e}")
 
-    # --- Categories ---
-    def get_categories(self):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT id, name FROM categories ORDER BY id")
-                return c.fetchall()
-        except Exception: return []
-
-    def add_category(self, name):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
-                conn.commit()
-            return True
-        except Exception: return False
-
-    def delete_category(self, cat_id):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                # Move items to "Uncategorized" (ID 1) before deleting
-                c.execute("UPDATE favorites SET category_id = 1 WHERE category_id = ?", (cat_id,))
-                c.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
-                conn.commit()
-            return True
-        except Exception: return False
-    
-    def rename_category(self, cat_id, new_name):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("UPDATE categories SET name = ? WHERE id = ?", (new_name, cat_id))
-                conn.commit()
-            return True
-        except Exception: return False
-
-    # --- Favorites ---
-    def add_favorite(self, item_id, item_name, category_id=1):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                # Upsert
-                c.execute("INSERT OR REPLACE INTO favorites (id, name, category_id) VALUES (?, ?, ?)", (item_id, item_name, category_id))
-                conn.commit()
-            return True
-        except Exception: return False
-
-    def remove_favorite(self, item_id):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("DELETE FROM favorites WHERE id = ?", (item_id,))
-                conn.commit()
-            return True
-        except Exception: return False
-
-    def get_favorites(self, category_id=None):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                if category_id:
-                    c.execute("SELECT id, name, category_id FROM favorites WHERE category_id = ? ORDER BY name", (category_id,))
-                else:
-                    c.execute("SELECT id, name, category_id FROM favorites ORDER BY name")
-                return c.fetchall()
-        except Exception: return []
-
-    def is_favorite(self, item_id):
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT 1 FROM favorites WHERE id = ?", (item_id,))
-                return c.fetchone() is not None
-        except Exception: return False
 
     # --- [P3] Price Alerts ---
     def add_price_alert(self, item_id, item_name, target_price, direction='below', server=None):

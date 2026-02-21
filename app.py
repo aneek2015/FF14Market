@@ -583,7 +583,7 @@ class FF14MarketApp(ctk.CTk):
         window.attributes("-topmost", True)
         
         # Data Loading
-        cats = self.db.get_categories() # {id: name}
+        cats = self.db.get_categories_dict() # {id: name}
         # Invert for name lookup
         cat_name_map = {v: k for k, v in cats.items()}
         cat_names = list(cats.values())
@@ -634,7 +634,7 @@ class FF14MarketApp(ctk.CTk):
         
         def refresh_cats():
             lb_cats.delete(0, tk.END)
-            updated_cats = self.db.get_categories()
+            updated_cats = self.db.get_categories_dict()
             # Update closure scope maps
             cats.clear() 
             cats.update(updated_cats)
@@ -1539,10 +1539,12 @@ class FF14MarketApp(ctk.CTk):
         self.update_market_ui(data, analysis)
 
     def update_ui_error(self, message):
-        self.progress_frame.pack_forget()
-        self.status_bar.configure(text=message, text_color="red")
-        self.search_button.configure(state="normal")
-        messagebox.showerror("錯誤", message)
+        def _update():
+            self.progress_frame.pack_forget()
+            self.status_bar.configure(text=message, text_color="red")
+            self.search_button.configure(state="normal")
+            messagebox.showerror("錯誤", message)
+        self.after(0, _update)
 
     def reset_analysis_ui(self):
         self.stat_velocity.configure(text="--", text_color="white")
