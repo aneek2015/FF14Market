@@ -27,8 +27,12 @@ class GuiHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
-        # 呼叫主程式的方法來處理訊息
-        self.app.append_log(msg)
+        # 呼叫主程式的方法來處理訊息 (Thread-Safe)
+        try:
+            self.app.append_log(msg)
+        except RuntimeError:
+            # 背景執行緒在 mainloop 啟動前呼叫時可能觸發此錯誤，安全忽略
+            pass
 
 # 設定基礎 logging
 logging.basicConfig(
@@ -313,10 +317,6 @@ class FF14MarketApp(ctk.CTk):
 
     def append_log(self, msg):
         """接收來自 logging 的訊息 (Thread-Safe)"""
-        # 1. 數據操作 (list append) 在 python 是 atomic 的 (大多情況)，但為求保險與一致性，
-        #    我們還是讓它留在呼叫當下執行，或者也放入 main thread。
-        #    這裡簡單處理：改為全由主執行緒負責更新，避免 Race Condition。
-        
         def _update_ui():
             self.log_history.append(msg)
             if self.debug_window and self.debug_textbox and self.debug_window.winfo_exists():
@@ -325,8 +325,12 @@ class FF14MarketApp(ctk.CTk):
                 self.debug_textbox.see("end")
                 self.debug_textbox.configure(state="disabled")
 
-        # 將工作排程到主執行緒
-        self.after(0, _update_ui)
+        # 將工作排程到主執行緒 (加入 RuntimeError 保護)
+        try:
+            self.after(0, _update_ui)
+        except RuntimeError:
+            # mainloop 尚未啟動或已關閉時，僅記錄到歷史
+            self.log_history.append(msg)
 
     def setup_treeview_style(self):
         """配置 Treeview 的深色主題樣式"""

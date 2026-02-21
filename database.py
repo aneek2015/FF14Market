@@ -26,9 +26,34 @@ class DatabaseManager:
                 c = conn.cursor()
                 c.execute('''CREATE TABLE IF NOT EXISTS custom_servers
                              (name TEXT PRIMARY KEY)''')
+                # item_cache 表：支援同 ID 多名稱（別名）
+                # 使用 (id, name) 複合主鍵，允許一個物品有多個名稱條目
                 c.execute('''CREATE TABLE IF NOT EXISTS item_cache
-                             (id INTEGER PRIMARY KEY, name TEXT)''')
+                             (id INTEGER, name TEXT, PRIMARY KEY(id, name))''')
                 c.execute('''CREATE INDEX IF NOT EXISTS idx_item_name ON item_cache (name)''')
+                
+                # 遷移：如果舊表結構是 id INTEGER PRIMARY KEY（無 name 在主鍵中）
+                # 檢測方法：嘗試插入同 ID 不同 name，如果失敗代表是舊結構
+                try:
+                    c.execute("PRAGMA table_info(item_cache)")
+                    columns = c.fetchall()
+                    # columns 格式: (cid, name, type, notnull, dflt_value, pk)
+                    # 舊結構: id 的 pk=1, name 的 pk=0
+                    # 新結構: id 的 pk=1, name 的 pk=2
+                    id_col = [col for col in columns if col[1] == 'id']
+                    name_col = [col for col in columns if col[1] == 'name']
+                    if id_col and name_col and name_col[0][5] == 0:
+                        # 舊結構，需要遷移
+                        logging.info("偵測到舊版 item_cache 表結構，開始遷移為支援別名的新結構...")
+                        c.execute("ALTER TABLE item_cache RENAME TO item_cache_old")
+                        c.execute('''CREATE TABLE item_cache
+                                     (id INTEGER, name TEXT, PRIMARY KEY(id, name))''')
+                        c.execute('''CREATE INDEX IF NOT EXISTS idx_item_name ON item_cache (name)''')
+                        c.execute("INSERT OR IGNORE INTO item_cache (id, name) SELECT id, name FROM item_cache_old")
+                        c.execute("DROP TABLE item_cache_old")
+                        logging.info("item_cache 表遷移完成。")
+                except Exception as mig_err:
+                    logging.warning(f"item_cache 遷移檢查時發生錯誤（可忽略）: {mig_err}")
                 
                 # Favorites table updated with category_id
                 c.execute('''CREATE TABLE IF NOT EXISTS favorites
@@ -254,7 +279,7 @@ class DatabaseManager:
         try:
             with self.get_connection() as conn:
                 c = conn.cursor()
-                c.execute("INSERT OR REPLACE INTO item_cache (id, name) VALUES (?, ?)", (item_id, item_name))
+                c.execute("INSERT OR IGNORE INTO item_cache (id, name) VALUES (?, ?)", (item_id, item_name))
                 conn.commit()
         except Exception as e:
             logging.error(f"Failed to cache item: {e}")
@@ -304,10 +329,11 @@ class DatabaseManager:
             return []
 
     def get_item_name_by_id(self, item_id):
+        """回傳物品名稱。若有多個別名，優先回傳最短的名稱。"""
         try:
             with self.get_connection() as conn:
                 c = conn.cursor()
-                c.execute("SELECT name FROM item_cache WHERE id = ?", (item_id,))
+                c.execute("SELECT name FROM item_cache WHERE id = ? ORDER BY length(name) ASC LIMIT 1", (item_id,))
                 result = c.fetchone()
             return result[0] if result else None
         except Exception as e:
