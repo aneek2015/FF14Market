@@ -14,9 +14,14 @@ if exist "FF14MarketApp.spec" del "FF14MarketApp.spec"
 
 REM Run PyInstaller for Main App
 echo.
+echo Checking dependencies for image conversion...
+pip install pillow
+
 echo Building Application (Folder Mode)...
 pyinstaller --noconfirm --onedir --windowed --clean ^
     --name "FF14MarketApp" ^
+    --icon="icon.jpg" ^
+    --splash="start.jpg" ^
     --collect-all customtkinter ^
     --collect-all matplotlib ^
     --collect-all pkg_resources ^
