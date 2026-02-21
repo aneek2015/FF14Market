@@ -159,23 +159,53 @@ Table: favorites
 
 Concurrency: PRAGMA journal_mode=WAL
 
-🔍 領域：物品檢索 (Item Retrieval)
-
-來源檔案: items_cache_tw.json (邏輯位於 app.py 中)
-
-Skill: search_item_id
+Skill: manage_price_alerts
 
 功能描述:
-根據中文名稱模糊搜尋物品 ID。使用靜態映射表進行快速查找。
+管理使用者的價格警報清單。支援新增警報目標價、查詢啟用中的警報、刪除警報，以及標記警報為已觸發。
+
+操作模式 (Operations):
+
+add: (item_id, item_name, target_price, direction, server) -> bool
+
+list: (enabled_only=True) -> list[dict]
+
+delete: (alert_id) -> void
+
+mark_triggered: (alert_id) -> void
+
+技術規格:
+
+Database: market_app.db
+
+Table: price_alerts
+
+監控邏輯: 獨立背景執行緒每 5 分鐘輪詢一次。
+
+🔍 領域：物品檢索 (Item Retrieval)
+
+來源檔案: database.py 與 update_items_cache.py
+
+Skill: search_local_items
+
+功能描述:
+根據中文名稱模糊搜尋物品 ID。使用 SQLite 記憶體快取或實體資料庫進行快速查找，支援同 ID 多重名稱映射（例如藏寶圖新舊名稱「陳舊的地圖G17」與「陳舊的獰豹革地圖」）。
 
 輸入參數 (Inputs):
 
-search_query (string): 物品名稱關鍵字 (如 "爆發藥")。
+search_keywords (list[string]): 物品名稱關鍵字列表 (如 ["爆發藥", "智力"])。
 
 輸出 (Outputs):
 
-matches (list[tuple]): (item_name, item_id) 的列表。
+matches (list[tuple]): (item_id, item_name, category_id) 的列表。
 
-備註:
+Skill: update_item_cache
 
-目前依賴靜態檔案 items_cache_tw.json，未來可擴充為動態更新 Skill。
+功能描述:
+從外部 API（Cafemaker）自動抓取最新的物品清單與圖示，並進行簡繁體中文轉換，更新本地的資料庫快取。支援「僅更新藏寶圖別名」、「僅進行簡繁轉換」、「增量更新」等多種操作模式。
+
+執行方式:
+
+外部腳本: `python update_items_cache.py`
+
+依賴: `requests`, `ijson`, 內建 700+ 簡繁對照字典。
