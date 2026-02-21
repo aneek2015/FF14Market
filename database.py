@@ -74,9 +74,21 @@ class DatabaseManager:
                 c.execute('''CREATE TABLE IF NOT EXISTS settings
                              (key TEXT PRIMARY KEY, value TEXT)''')
 
-                # User Vocabulary Table (New)
+                # User Vocabulary Table
                 c.execute('''CREATE TABLE IF NOT EXISTS user_vocabulary
                              (original_term TEXT PRIMARY KEY, corrected_term TEXT)''')
+                
+                # [P3] Price Alerts Table
+                c.execute('''CREATE TABLE IF NOT EXISTS price_alerts
+                             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                              item_id INTEGER NOT NULL,
+                              item_name TEXT,
+                              target_price REAL NOT NULL,
+                              direction TEXT DEFAULT 'below',
+                              server TEXT,
+                              enabled INTEGER DEFAULT 1,
+                              triggered INTEGER DEFAULT 0,
+                              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
                 
                 # Ensure default servers exist
                 default_servers = ['伊弗利特', '利維坦', '奧汀', '巴哈姆特', '泰坦', '迦樓羅', '鳳凰', '繁中服']
@@ -457,3 +469,54 @@ class DatabaseManager:
                 c.execute("SELECT 1 FROM favorites WHERE id = ?", (item_id,))
                 return c.fetchone() is not None
         except Exception: return False
+
+    # --- [P3] Price Alerts ---
+    def add_price_alert(self, item_id, item_name, target_price, direction='below', server=None):
+        """新增價格警報。direction: 'below'(低於目標) 或 'above'(高於目標)"""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO price_alerts (item_id, item_name, target_price, direction, server) VALUES (?, ?, ?, ?, ?)",
+                    (item_id, item_name, target_price, direction, server))
+                conn.commit()
+                return True
+        except Exception as e:
+            logging.error(f"Add price alert failed: {e}")
+            return False
+
+    def get_price_alerts(self, enabled_only=True):
+        """取得所有警報。回傳 list of dict。"""
+        try:
+            with self.get_connection() as conn:
+                if enabled_only:
+                    rows = conn.execute(
+                        "SELECT id, item_id, item_name, target_price, direction, server, enabled, triggered FROM price_alerts WHERE enabled = 1"
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT id, item_id, item_name, target_price, direction, server, enabled, triggered FROM price_alerts ORDER BY created_at DESC"
+                    ).fetchall()
+                return [{
+                    'id': r[0], 'item_id': r[1], 'item_name': r[2],
+                    'target_price': r[3], 'direction': r[4], 'server': r[5],
+                    'enabled': bool(r[6]), 'triggered': bool(r[7])
+                } for r in rows]
+        except Exception as e:
+            logging.error(f"Get price alerts failed: {e}")
+            return []
+
+    def delete_price_alert(self, alert_id):
+        try:
+            with self.get_connection() as conn:
+                conn.execute("DELETE FROM price_alerts WHERE id = ?", (alert_id,))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Delete price alert failed: {e}")
+
+    def mark_alert_triggered(self, alert_id):
+        try:
+            with self.get_connection() as conn:
+                conn.execute("UPDATE price_alerts SET triggered = 1, enabled = 0 WHERE id = ?", (alert_id,))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Mark alert triggered failed: {e}")

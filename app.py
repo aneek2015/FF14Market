@@ -119,6 +119,15 @@ class FF14MarketApp(ctk.CTk):
         self.hot_items_cache_ttl = 300   # 快取有效期（秒）= 5 分鐘
         self.hot_items_cache_params = {} # 快取時的參數 (hours, sample_size)
 
+        # [P3] 價格警報監控
+        self._alert_running = False
+        self._alert_interval = 300  # 5 分鐘檢查一次
+        
+        # [P3+P4] 自動刷新
+        self._auto_refresh_active = False
+        self._auto_refresh_interval = 300  # 5 分鐘
+        self._auto_refresh_job = None
+
         # 設定表格樣式
         self.setup_treeview_style()
 
@@ -421,12 +430,28 @@ class FF14MarketApp(ctk.CTk):
         self.settings_button = ctk.CTkButton(self.sidebar_frame, text="⚙️ 參數設定", command=self.open_settings_window, fg_color="transparent", border_width=1, text_color="silver")
         self.settings_button.grid(row=13, column=0, padx=20, pady=(10, 0), sticky="s")
 
+        # [P3] 價格警報按鈕
+        self.alert_button = ctk.CTkButton(self.sidebar_frame, text="🔔 價格警報", command=self.open_alert_window, fg_color="#D63384", hover_color="#A02560")
+        self.alert_button.grid(row=12, column=0, padx=20, pady=(5, 5))
+
+        # [P4] 自動刷新切換
+        self.auto_refresh_var = ctk.BooleanVar(value=False)
+        self.auto_refresh_cb = ctk.CTkCheckBox(self.sidebar_frame, text="自動刷新 (5分)", 
+                                                variable=self.auto_refresh_var, 
+                                                command=self._toggle_auto_refresh,
+                                                text_color="#AAA")
+        self.auto_refresh_cb.grid(row=5, column=0, padx=20, pady=(0, 5))
+
+        # [P4] 主題切換
+        self.theme_button = ctk.CTkButton(self.sidebar_frame, text="🎨 切換主題", command=self._toggle_theme, fg_color="transparent", border_width=1, text_color="silver", height=24)
+        self.theme_button.grid(row=16, column=0, padx=20, pady=(0, 10), sticky="s")
+
 
         self.help_button = ctk.CTkButton(self.sidebar_frame, text="使用說明 / Help", command=self.show_help_window, fg_color="transparent", border_width=1, text_color="silver")
         self.help_button.grid(row=14, column=0, padx=20, pady=(5, 5), sticky="s")
 
         self.debug_button = ctk.CTkButton(self.sidebar_frame, text="🔧 Debug", command=self.open_debug_window, fg_color="#444", hover_color="#333", height=24)
-        self.debug_button.grid(row=15, column=0, padx=20, pady=(5, 20), sticky="s")
+        self.debug_button.grid(row=15, column=0, padx=20, pady=(5, 5), sticky="s")
 
 
 
@@ -2369,6 +2394,227 @@ class FF14MarketApp(ctk.CTk):
                 self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
             
             threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
+
+    # ========================================================
+    # [P3] 價格警報系統
+    # ========================================================
+    def open_alert_window(self):
+        """開啟價格警報管理視窗"""
+        win = ctk.CTkToplevel(self)
+        win.title("🔔 價格警報管理")
+        win.geometry("650x500")
+        win.transient(self)
+        win.grab_set()
+
+        # --- 新增警報區域 ---
+        add_frame = ctk.CTkFrame(win)
+        add_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkLabel(add_frame, text="新增警報", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=4, pady=(5, 10))
+
+        ctk.CTkLabel(add_frame, text="物品名稱/ID:").grid(row=1, column=0, padx=5, sticky="w")
+        item_entry = ctk.CTkEntry(add_frame, width=150, placeholder_text="例: 剛力之幻藥G8")
+        item_entry.grid(row=1, column=1, padx=5)
+
+        ctk.CTkLabel(add_frame, text="目標價格:").grid(row=1, column=2, padx=5, sticky="w")
+        price_entry = ctk.CTkEntry(add_frame, width=100, placeholder_text="10000")
+        price_entry.grid(row=1, column=3, padx=5)
+
+        dir_var = ctk.StringVar(value="低於時通知")
+        dir_menu = ctk.CTkOptionMenu(add_frame, values=["低於時通知", "高於時通知"], variable=dir_var, width=120)
+        dir_menu.grid(row=2, column=1, padx=5, pady=5)
+
+        # --- 警報列表 ---
+        list_frame = ctk.CTkFrame(win)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        cols = ("物品", "目標價", "方向", "伺服器", "狀態")
+        alert_tree = ttk.Treeview(list_frame, columns=cols, show='headings', selectmode='browse', height=10)
+        for c in cols:
+            alert_tree.heading(c, text=c)
+        alert_tree.column("物品", width=180)
+        alert_tree.column("目標價", width=100, anchor="center")
+        alert_tree.column("方向", width=80, anchor="center")
+        alert_tree.column("伺服器", width=100, anchor="center")
+        alert_tree.column("狀態", width=80, anchor="center")
+        alert_tree.pack(fill="both", expand=True, padx=5, pady=5)
+
+        def refresh_list():
+            alert_tree.delete(*alert_tree.get_children())
+            alerts = self.db.get_price_alerts(enabled_only=False)
+            for a in alerts:
+                direction_text = "⬇ 低於" if a['direction'] == 'below' else "⬆ 高於"
+                status_text = "✅ 已觸發" if a['triggered'] else ("🟢 監控中" if a['enabled'] else "⏸ 暫停")
+                alert_tree.insert("", "end", iid=str(a['id']), values=(
+                    a['item_name'], f"{a['target_price']:,.0f}", direction_text,
+                    a.get('server', self.selected_dc) or "—", status_text
+                ))
+
+        def add_alert():
+            item_text = item_entry.get().strip()
+            price_text = price_entry.get().strip()
+            if not item_text or not price_text:
+                messagebox.showwarning("提示", "請輸入物品名稱和目標價格")
+                return
+            try:
+                target_price = float(price_text)
+            except ValueError:
+                messagebox.showwarning("提示", "目標價格必須是數字")
+                return
+
+            # 搜尋物品取得 ID + 名稱
+            results = self.db.search_local_items(item_text, limit=1)
+            if not results:
+                results = self.api.search_item_web(item_text)
+            if not results:
+                messagebox.showwarning("提示", f"找不到物品: {item_text}")
+                return
+
+            item_id, item_name = results[0][0], results[0][1]
+            direction = 'below' if "低於" in dir_var.get() else 'above'
+            server = self.selected_dc
+
+            if self.db.add_price_alert(item_id, item_name, target_price, direction, server):
+                logging.info(f"[警報] 新增: {item_name} {direction} {target_price:,.0f}")
+                item_entry.delete(0, "end")
+                price_entry.delete(0, "end")
+                refresh_list()
+                # 確保監控執行緒在運行
+                if not self._alert_running:
+                    self._start_alert_monitor()
+
+        def delete_alert():
+            sel = alert_tree.selection()
+            if not sel:
+                return
+            alert_id = int(sel[0])
+            self.db.delete_price_alert(alert_id)
+            refresh_list()
+
+        # 按鈕列
+        btn_frame = ctk.CTkFrame(win, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        ctk.CTkButton(add_frame, text="➕ 新增警報", command=add_alert, width=120, fg_color="#28A745", hover_color="#1E7E34").grid(row=2, column=3, padx=5, pady=5)
+        ctk.CTkButton(btn_frame, text="🗑 刪除選中", command=delete_alert, fg_color="#DC3545", hover_color="#A71D2A", width=120).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="🔄 刷新", command=refresh_list, width=80).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="關閉", command=win.destroy, width=80, fg_color="transparent", border_width=1).pack(side="right", padx=5)
+
+        refresh_list()
+
+    def _start_alert_monitor(self):
+        """啟動背景價格警報監控"""
+        if self._alert_running:
+            return
+        self._alert_running = True
+        def monitor_loop():
+            while self._alert_running:
+                try:
+                    self._check_alerts()
+                except Exception as e:
+                    logging.debug(f"Alert check error: {e}")
+                time.sleep(self._alert_interval)
+        t = threading.Thread(target=monitor_loop, daemon=True)
+        t.start()
+        logging.info(f"[警報] 背景監控已啟動，每 {self._alert_interval} 秒檢查一次")
+
+    def _check_alerts(self):
+        """檢查所有啟用的警報"""
+        alerts = self.db.get_price_alerts(enabled_only=True)
+        if not alerts:
+            return
+        
+        for alert in alerts:
+            try:
+                server = alert.get('server') or self.selected_dc
+                data, status = self.api.fetch_market_data(server, alert['item_id'])
+                if status != 200 or not data:
+                    continue
+                
+                listings = data.get('listings', [])
+                if not listings:
+                    continue
+                
+                current_min = listings[0].get('pricePerUnit', 0)
+                if current_min <= 0:
+                    continue
+                
+                triggered = False
+                if alert['direction'] == 'below' and current_min <= alert['target_price']:
+                    triggered = True
+                elif alert['direction'] == 'above' and current_min >= alert['target_price']:
+                    triggered = True
+                
+                if triggered:
+                    self.db.mark_alert_triggered(alert['id'])
+                    dir_text = "低於" if alert['direction'] == 'below' else "高於"
+                    msg = f"🔔 {alert['item_name']}\n目前最低價: {current_min:,.0f}\n目標: {dir_text} {alert['target_price']:,.0f}"
+                    logging.info(f"[警報觸發] {msg}")
+                    self._show_alert_notification(alert['item_name'], current_min, alert['target_price'], alert['direction'])
+                    
+                time.sleep(0.5)  # 避免 API 過度請求
+            except Exception as e:
+                logging.debug(f"Alert check for {alert.get('item_name', '?')} failed: {e}")
+
+    def _show_alert_notification(self, item_name, current_price, target_price, direction):
+        """在主執行緒顯示警報通知"""
+        dir_text = "⬇ 低於" if direction == 'below' else "⬆ 高於"
+        def _show():
+            try:
+                self.status_bar.configure(text=f"🔔 警報觸發！{item_name} 目前 {current_price:,.0f} ({dir_text} {target_price:,.0f})", text_color="#F72585")
+                messagebox.showinfo("🔔 價格警報觸發！",
+                    f"物品：{item_name}\n"
+                    f"目前最低價：{current_price:,.0f} gil\n"
+                    f"目標價格：{dir_text} {target_price:,.0f} gil\n\n"
+                    f"快去市場板搶購吧！")
+            except Exception:
+                pass
+        self.after(0, _show)
+
+    # ========================================================
+    # [P3+P4] 自動刷新
+    # ========================================================
+    def _toggle_auto_refresh(self):
+        """切換自動刷新模式"""
+        if self.auto_refresh_var.get():
+            self._auto_refresh_active = True
+            self._schedule_auto_refresh()
+            self.status_bar.configure(text=f"🔄 自動刷新已開啟（每 {self._auto_refresh_interval // 60} 分鐘）", text_color="#4CC9F0")
+            logging.info(f"[自動刷新] 已開啟，間隔 {self._auto_refresh_interval}s")
+        else:
+            self._auto_refresh_active = False
+            if self._auto_refresh_job:
+                self.after_cancel(self._auto_refresh_job)
+                self._auto_refresh_job = None
+            self.status_bar.configure(text="🔄 自動刷新已關閉", text_color="#AAA")
+            logging.info("[自動刷新] 已關閉")
+
+    def _schedule_auto_refresh(self):
+        """排程下一次自動刷新"""
+        if self._auto_refresh_active:
+            self._auto_refresh_job = self.after(self._auto_refresh_interval * 1000, self._auto_refresh_tick)
+
+    def _auto_refresh_tick(self):
+        """執行自動刷新"""
+        if not self._auto_refresh_active:
+            return
+        if self.current_item_id and not self.is_loading:
+            logging.info(f"[自動刷新] 刷新 {self.current_item_name}")
+            self.start_search(use_current_id=True)
+        self._schedule_auto_refresh()
+
+    # ========================================================
+    # [P4] 主題切換
+    # ========================================================
+    def _toggle_theme(self):
+        """深色/淺色主題切換"""
+        current = ctk.get_appearance_mode()
+        if current == "Dark":
+            ctk.set_appearance_mode("Light")
+            self.status_bar.configure(text="🎨 已切換為淺色主題")
+        else:
+            ctk.set_appearance_mode("Dark")
+            self.status_bar.configure(text="🎨 已切換為深色主題")
 
 if __name__ == "__main__":
     app = FF14MarketApp()
