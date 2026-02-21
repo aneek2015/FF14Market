@@ -8,6 +8,14 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk, filedialog
 
+# [P2] matplotlib 嵌入 tkinter
+import matplotlib
+matplotlib.use('Agg')  # 非互動後端，用於嵌入
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.dates import DateFormatter
+import matplotlib.dates as mdates
+
 # Import new modules
 from database import DatabaseManager
 from market_api import MarketAPI, DataAnalyzer
@@ -810,12 +818,23 @@ class FF14MarketApp(ctk.CTk):
     def setup_tab_history(self):
         tab = self.tabview.tab("歷史數據")
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)  # TreeView 占大部分
+
+        # [P2] 價格走勢圖區域
+        self.chart_frame = ctk.CTkFrame(tab, height=200, fg_color="#1A1A2E")
+        self.chart_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 0))
+        self.chart_frame.grid_propagate(False)  # 固定高度
+        
+        self.fig, self.ax = plt.subplots(figsize=(8, 2.2), dpi=100)
+        self.fig.patch.set_facecolor('#1A1A2E')
+        self.ax.set_facecolor('#16213E')
+        self.chart_canvas = FigureCanvasTkAgg(self.fig, master=self.chart_frame)
+        self.chart_canvas.get_tk_widget().pack(fill="both", expand=True)
 
         self.history_container = ctk.CTkFrame(tab, corner_radius=0, fg_color="transparent")
-        self.history_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=10)
+        self.history_container.grid(row=1, column=0, sticky="nsew", padx=5, pady=(5, 10))
 
-        # [New] Controls Frame
+        # Controls Frame
         ctrl_frame = ctk.CTkFrame(self.history_container, fg_color="transparent")
         ctrl_frame.pack(fill="x", pady=(0, 5))
 
@@ -825,7 +844,7 @@ class FF14MarketApp(ctk.CTk):
         self.hist_sort_btn = ctk.CTkSegmentedButton(ctrl_frame, values=["依時間排序", "依堆疊熱門度"],
                                                     variable=self.history_sort_var,
                                                     command=self.refresh_history_ui)
-        self.hist_sort_btn.pack(side="right") # Pack right aligned
+        self.hist_sort_btn.pack(side="right")
 
         h_cols = ("單價", "數量", "交易時間")
         self.history_tree = ttk.Treeview(self.history_container, columns=h_cols, show='headings', selectmode='browse')
@@ -1209,38 +1228,6 @@ class FF14MarketApp(ctk.CTk):
 
         self.search_button.configure(state="normal")
 
-    def start_search(self, use_current_id=False):
-        if not self.selected_dc or self.selected_dc == "尚未設定伺服器":
-            messagebox.showwarning("提示", "請先選擇或新增一個伺服器。")
-            return
-
-        if use_current_id and self.current_item_id:
-            if self.is_loading: return
-            logging.info(f"Refreshing data for item ID: {self.current_item_id}")
-            self.status_bar.configure(text=f"正在刷新 {self.current_item_name} 的數據...", text_color="yellow")
-            # Trigger both market and crafting data fetches
-            self.is_loading = True
-            threading.Thread(target=self.fetch_market_data, args=(self.current_item_id,)).start()
-            threading.Thread(target=self._process_crafting_logic, args=(self.current_item_id, self.current_item_name)).start()
-            return
-
-        raw_input = self.search_entry.get().strip()
-        if not raw_input:
-            return
-            
-        if self.is_loading: return
-
-        if self.is_loading: return
-
-        # [New] 自訂詞彙反向搜尋轉換
-        if raw_input in self.vocabulary_reverse_map:
-            original_term = self.vocabulary_reverse_map[raw_input]
-            logging.info(f"偵測到自訂詞彙: '{raw_input}' -> 自動轉換為原始名稱: '{original_term}'")
-            self.status_bar.configure(text=f"自訂詞彙轉換: {raw_input} -> {original_term}")
-            raw_input = original_term
-
-        # 呼叫新的多執行緒搜尋
-        self.search_item_thread(raw_input)
 
     def search_item_thread(self, query):
         """
@@ -1401,7 +1388,14 @@ class FF14MarketApp(ctk.CTk):
             
         if self.is_loading: return
 
-        # 直接呼叫新的多執行緒搜尋 (不再使用 perform_search_process)
+        # 自訂詞彙反向搜尋轉換
+        if raw_input in self.vocabulary_reverse_map:
+            original_term = self.vocabulary_reverse_map[raw_input]
+            logging.info(f"偵測到自訂詞彙: '{raw_input}' -> 自動轉換為原始名稱: '{original_term}'")
+            self.status_bar.configure(text=f"自訂詞彙轉換: {raw_input} -> {original_term}")
+            raw_input = original_term
+
+        # 呼叫多執行緒搜尋
         self.search_item_thread(raw_input)
 
     def update_title(self, name, iid):
@@ -1656,11 +1650,9 @@ class FF14MarketApp(ctk.CTk):
 
     def refresh_history_ui(self, value=None):
         """Refreshes the History tab based on current sort method."""
-        # Check if we have analysis data
         if not self.current_analysis:
             return
 
-        # Clear current items
         self.history_tree.delete(*self.history_tree.get_children())
         
         history = self.current_analysis.get("merged_history", [])
@@ -1669,19 +1661,13 @@ class FF14MarketApp(ctk.CTk):
 
         sort_mode = self.history_sort_var.get()
         
-        # [Sorting Logic]
         if sort_mode == "依堆疊熱門度":
             from collections import Counter
-            # 1. Calculate frequency of each quantity
             stack_counts = Counter(h['quantity'] for h in history)
-            # 2. Sort by: Frequency DESC, Quantity DESC, Time DESC
             sorted_history = sorted(history, key=lambda x: (stack_counts[x['quantity']], x['quantity'], x['timestamp']), reverse=True)
         else:
-            # Default: Time descending (already sorted usually, but ensure it)
             sorted_history = sorted(history, key=lambda x: x['timestamp'], reverse=True)
-            
-        # [Display]
-        # Limit to top 200 for performance if list is huge, though 500 should be fine
+        
         for entry in sorted_history[:500]:
             price = entry.get("pricePerUnit", 0)
             qty = entry.get("quantity", 0)
@@ -1691,6 +1677,82 @@ class FF14MarketApp(ctk.CTk):
             hq_mark = "★" if is_hq else ""
             
             self.history_tree.insert("", "end", values=(f"{price:,} {hq_mark}", str(qty), date_str))
+
+        # [P2] 更新價格走勢圖
+        self._update_price_chart(history)
+
+    def _update_price_chart(self, history):
+        """[P2] 更新歷史價格走勢圖"""
+        try:
+            self.ax.clear()
+            
+            if not history:
+                self.ax.text(0.5, 0.5, '無歷史數據', ha='center', va='center', 
+                            color='#666', fontsize=14, transform=self.ax.transAxes)
+                self.chart_canvas.draw_idle()
+                return
+            
+            # 按時間排序 (過濾異常價格)
+            valid = [h for h in history if h.get('pricePerUnit', 0) > 0]
+            if not valid:
+                self.chart_canvas.draw_idle()
+                return
+            
+            # 異常值過濾 (median ± 5x)
+            prices_sorted = sorted([h['pricePerUnit'] for h in valid])
+            median_p = prices_sorted[len(prices_sorted)//2]
+            valid = [h for h in valid if 0.1 * median_p <= h['pricePerUnit'] <= 5 * median_p]
+            
+            if not valid:
+                self.chart_canvas.draw_idle()
+                return
+            
+            valid.sort(key=lambda x: x['timestamp'])
+            
+            dates = [datetime.fromtimestamp(h['timestamp']) for h in valid]
+            prices = [h['pricePerUnit'] for h in valid]
+            hq_flags = [h.get('hq', False) for h in valid]
+            
+            # HQ 和 NQ 分色
+            hq_dates = [d for d, hq in zip(dates, hq_flags) if hq]
+            hq_prices = [p for p, hq in zip(prices, hq_flags) if hq]
+            nq_dates = [d for d, hq in zip(dates, hq_flags) if not hq]
+            nq_prices = [p for p, hq in zip(prices, hq_flags) if not hq]
+            
+            # 畫圖
+            if nq_dates:
+                self.ax.scatter(nq_dates, nq_prices, s=8, color='#4CC9F0', alpha=0.5, label='NQ', zorder=2)
+            if hq_dates:
+                self.ax.scatter(hq_dates, hq_prices, s=12, color='#F72585', alpha=0.7, label='HQ ★', zorder=3)
+            
+            # 移動平均線
+            if len(prices) >= 5:
+                window = min(20, len(prices) // 3)
+                if window >= 2:
+                    ma_prices = []
+                    for i in range(len(prices)):
+                        start = max(0, i - window + 1)
+                        ma_prices.append(sum(prices[start:i+1]) / (i - start + 1))
+                    self.ax.plot(dates, ma_prices, color='#4361EE', linewidth=1.5, alpha=0.9, label=f'MA{window}', zorder=4)
+            
+            # 樣式
+            self.ax.set_facecolor('#16213E')
+            self.ax.tick_params(colors='#AAA', labelsize=8)
+            self.ax.spines['bottom'].set_color('#333')
+            self.ax.spines['left'].set_color('#333')
+            self.ax.spines['top'].set_visible(False)
+            self.ax.spines['right'].set_visible(False)
+            self.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+            self.ax.xaxis.set_major_formatter(DateFormatter('%m/%d'))
+            self.ax.legend(loc='upper left', fontsize=7, framealpha=0.5, 
+                          facecolor='#1A1A2E', edgecolor='#333', labelcolor='#CCC')
+            self.ax.grid(True, alpha=0.15, color='#555')
+            
+            self.fig.tight_layout(pad=0.5)
+            self.chart_canvas.draw_idle()
+            
+        except Exception as e:
+            logging.debug(f"Chart update error: {e}")
 
     def open_in_browser(self):
         if self.current_item_id:

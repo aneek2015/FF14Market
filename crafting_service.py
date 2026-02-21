@@ -1,6 +1,4 @@
 import logging
-
-import logging
 import math
 
 class CraftingService:
@@ -9,15 +7,21 @@ class CraftingService:
         self.recipe_provider = recipe_provider
         self.db = db_manager
         self.MAX_RECURSION_DEPTH = 10 # 防止無限遞迴
+        self._no_recipe_cache = set()  # [P2] 無配方物品快取
 
     def get_crafting_data(self, item_id, server_dc):
         """
         計算指定物品的製作成本與預期利潤 (包含遞迴成本分析)。
         此方法負責處理頂層物品，並呼叫遞迴函式來處理子材料。
         """
-        # 1. 取得頂層配方
+        # 1. [P2] 快取檢查
+        if item_id in self._no_recipe_cache:
+            return {"status": "no_recipe"}
+
+        # 2. 取得頂層配方
         top_recipe = self.recipe_provider.get_recipe(item_id)
         if not top_recipe:
+            self._no_recipe_cache.add(item_id)
             return {"status": "no_recipe"}
 
         if not server_dc or server_dc == "尚未設定伺服器":

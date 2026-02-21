@@ -27,8 +27,20 @@ class MarketAPI:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
+        # [P1] 記憶體快取
+        self._market_cache = {}   # key: "server:item_id" -> (data, timestamp)
+        self._search_cache = {}   # key: query -> (results, timestamp)
+        self._cache_ttl = 180     # 快取有效期：3 分鐘
+
     def search_item_web(self, query):
-        """Searches for an item using Cafemaker API."""
+        """Searches for an item using Cafemaker API (with cache)."""
+        # [P1] 檢查快取
+        cache_key = query.lower()
+        cached = self._search_cache.get(cache_key)
+        if cached and (time.time() - cached[1]) < self._cache_ttl:
+            logging.debug(f"Search cache hit: {query}")
+            return cached[0]
+
         try:
             if query.isdigit():
                 item_id = int(query)
@@ -38,7 +50,9 @@ class MarketAPI:
                     data = resp.json()
                     name = data.get("Name")
                     if name:
-                        return [(item_id, name)]
+                        result = [(item_id, name)]
+                        self._search_cache[cache_key] = (result, time.time())
+                        return result
             else:
                 search_url = f"https://cafemaker.wakingsands.com/search?indexes=Item&string={query}"
                 resp = self.session.get(search_url, timeout=10)
@@ -48,13 +62,21 @@ class MarketAPI:
                     candidates = []
                     for res in results:
                         candidates.append((res.get("ID"), res.get("Name", "Unknown")))
+                    self._search_cache[cache_key] = (candidates, time.time())
                     return candidates
         except Exception as e:
             logging.error(f"Web search failed: {e}")
         return []
 
     def fetch_market_data(self, server, item_id):
-        """Fetches market data from Universalis (Single Item)."""
+        """Fetches market data from Universalis (Single Item, with cache)."""
+        # [P1] 檢查快取
+        cache_key = f"{server}:{item_id}"
+        cached = self._market_cache.get(cache_key)
+        if cached and (time.time() - cached[1]) < self._cache_ttl:
+            logging.debug(f"Market cache hit: {cache_key}")
+            return cached[0], 200
+
         url = f"https://universalis.app/api/v2/{server}/{item_id}?entries=500"
         try:
             resp = self.session.get(url, timeout=15)
@@ -63,7 +85,9 @@ class MarketAPI:
             if resp.status_code != 200:
                 logging.error(f"Universalis API Error: {resp.status_code}")
                 return None, resp.status_code
-            return resp.json(), 200
+            data = resp.json()
+            self._market_cache[cache_key] = (data, time.time())
+            return data, 200
         except Exception as e:
             logging.error(f"Fetch market data failed: {e}")
             raise e
@@ -452,195 +476,32 @@ class DataAnalyzer:
             "velocity": 0, "velocity_tx": 0, "avg_sale_price": 0, "avg_price_type": "None",
             "min_price": 0, "profit": 0, "flip_profit": 0, "roi": 0, "arbitrage": 0, 
             "arbitrage_warning": False, "sniping_profit": 0, "sniping_cost": 0,
-            "days_to_sell": 999, "stock_total": 0, "total_stock_raw": 0, "stack_diff": 0,
+            "days_to_sell": 999, "stock_total": 0, "total_stock_raw": 0, 
+            "stack_diff": 0, "stack_popularity": [],
             "merged_listings": [], "merged_history": []
-        }
-        avg_entries = config.get("avg_price_entries", 20)
-        
-        # [Phase 2 Configs]
-        avg_price_days_limit = config.get("avg_price_days_limit", 30)
-        tax_rate = config.get("market_tax_rate", 5) / 100.0
-        sniping_threshold = config.get("sniping_min_profit", 2000)
-
-        listings = []
-        history = []
-        
-        # Flatten data
-        if "items" in data and isinstance(data["items"], dict):
-            for _, item_data in data["items"].items():
-                listings.extend(item_data.get("listings", []))
-                history.extend(item_data.get("recentHistory", []))
-        else:
-            listings = data.get("listings", [])
-            history = data.get("recentHistory", [])
-
-        # --- 1. STRICT HQ/NQ FILTERING (GLOBAL) ---
-        # This ensures ALL metrics (Velocity, Stock, AvgPrice) are strictly filtered.
-        if hq_only:
-            listings = [l for l in listings if l.get("hq")]
-            history = [h for h in history if h.get("hq")]
-
-        listings.sort(key=lambda x: x.get("pricePerUnit", 0))
-        history.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-
-        if not history and not listings:
-            return DataAnalyzer._empty_metrics()
-        
-        # Define current time once
-        now_ts = datetime.now().timestamp()
-
-        # --- 2. VELOCITY & OUTLIER REMOVAL ---
-        valid_history = [h for h in history if h.get("pricePerUnit", 0) > 0]
-        
-        if valid_history:
-            prices = sorted([h['pricePerUnit'] for h in valid_history])
-            median_price = prices[len(prices)//2]
-            valid_history = [
-                h for h in valid_history 
-                if 0.1 * median_price <= h['pricePerUnit'] <= 10 * median_price
-            ]
-        
-        check_days_ago = now_ts - (velocity_days * 24 * 3600)
-        recent_sales = [h for h in valid_history if h['timestamp'] > check_days_ago]
-        
-        total_quantity_sold = sum(h['quantity'] for h in recent_sales)
-        total_tx_sold = len(recent_sales)
-        
-        velocity_items = total_quantity_sold / float(velocity_days)
-        velocity_tx = total_tx_sold / float(velocity_days)
-
-        # --- 3. AVERAGE PRICE (TIME TRAP FIXED) ---
-        # Filter history for Avg Price calculation to avoid "old data" trap
-        avg_price_cutoff = now_ts - (avg_price_days_limit * 24 * 3600)
-        
-        # Candidates for avg price: recent valid sales
-        avg_price_candidates = [
-            h for h in valid_history 
-            if h['timestamp'] > avg_price_cutoff
-        ][:avg_entries] # Take top N recent
-        
-        avg_sale_price = 0
-        if avg_price_candidates:
-            avg_sale_price = sum(h['pricePerUnit'] for h in avg_price_candidates) / len(avg_price_candidates)
-        
-        # Fallback to current listings if history is too old or empty
-        if avg_sale_price == 0 and listings:
-             avg_sale_price = sum(l['pricePerUnit'] for l in listings[:5]) / len(listings[:5])
-
-        # --- 4. ZOMBIE LISTING FILTER (Effective Stock) ---
-        min_price = listings[0]['pricePerUnit'] if listings else 0
-        effective_limit = min_price * 1.5
-        effective_listings = [l for l in listings if l.get("pricePerUnit", 0) <= effective_limit]
-        effective_stock = sum(l.get("quantity", 0) for l in effective_listings)
-        
-        days_to_sell = 999.0
-        if velocity_items > 0:
-            days_to_sell = effective_stock / velocity_items
-        
-        # --- 5. REVENUE & PROFIT (Configurable Tax) ---
-        # Revenue = MinPrice * (1 - Tax)
-        expected_revenue_per_unit = min_price * (1 - tax_rate)
-        
-        # Flip Profit: (Avg * (1-Tax)) - Min
-        flip_profit = (avg_sale_price * (1 - tax_rate)) - min_price
-
-        roi = 0
-        if min_price > 0:
-            roi = (flip_profit / min_price) * 100
-
-        # --- 6. ARBITRAGE (Dynamic Warning) ---
-        arbitrage_spread = 0
-        arbitrage_warning = False
-        
-        # Dynamic Warning Threshold
-        # High Velocity (>20) -> 30 mins (1800s)
-        # Low Velocity (<1)   -> 6 hours (21600s)
-        # Normal              -> 2 hours (7200s)
-        if velocity_items > 20:
-            warning_threshold = 1800
-        elif velocity_items < 1:
-            warning_threshold = 21600
-        else:
-            warning_threshold = 7200
-        
-        if listings:
-            world_min_prices = {}
-            for l in listings:
-                w_name = l.get("worldName", str(l.get("worldID")))
-                price = l.get("pricePerUnit")
-                if w_name not in world_min_prices or price < world_min_prices[w_name]['price']:
-                    world_min_prices[w_name] = {
-                        'price': price,
-                        'time': l.get('lastReviewTime', 0)
-                    }
-            
-            if len(world_min_prices) > 1:
-                global_min_entry = min(world_min_prices.values(), key=lambda x: x['price'])
-                global_min = global_min_entry['price']
-                global_max_of_mins = max(v['price'] for v in world_min_prices.values())
-                
-                arbitrage_spread = (global_max_of_mins * (1 - tax_rate)) - global_min
-                
-                last_upload = global_min_entry['time']
-                if last_upload > 2000000000: last_upload /= 1000 # Handle ms
-                
-                if (now_ts - last_upload) > warning_threshold:
-                    arbitrage_warning = True
-
-        # --- 7. SNIPING VALIDATION (Min Profit Threshold) ---
-        sniping_profit = 0
-        if len(listings) >= 2:
-            first_price = listings[0]['pricePerUnit']
-            second_price = listings[1]['pricePerUnit']
-            
-            is_valid_gap = True
-            # Sanity check: 2nd price shouldn't be absurdly high vs Avg
-            if avg_sale_price > 0 and second_price > (avg_sale_price * 3.0):
-                is_valid_gap = False
-            
-            if is_valid_gap:
-                raw_profit = (second_price * (1 - tax_rate)) - first_price
-                # Min Profit Threshold Check
-                if raw_profit >= sniping_threshold:
-                    sniping_profit = raw_profit
-                else:
-                    sniping_profit = 0
-
-        # --- 8. Stack Optimization ---
-        small_stack_sales = [h['pricePerUnit'] for h in valid_history if 1 <= h['quantity'] <= 5]
-        large_stack_sales = [h['pricePerUnit'] for h in valid_history if h['quantity'] >= 99]
-        avg_small = sum(small_stack_sales)/len(small_stack_sales) if small_stack_sales else 0
-        avg_large = sum(large_stack_sales)/len(large_stack_sales) if large_stack_sales else 0
-        stack_diff = avg_small - avg_large if (avg_small > 0 and avg_large > 0) else 0
-
-        return {
-            "velocity": velocity_items,
-            "velocity_tx": velocity_tx,
-            "avg_sale_price": avg_sale_price,
-            "min_price": min_price,
-            "profit": expected_revenue_per_unit,
-            "flip_profit": flip_profit,
-            "roi": roi,
-            "arbitrage": arbitrage_spread,
-            "arbitrage_warning": arbitrage_warning,
-            "sniping_profit": sniping_profit,
-            "days_to_sell": days_to_sell,
-            "stock_total": effective_stock,
-            "total_stock_raw": sum(l.get("quantity", 0) for l in listings),
-            "stack_diff": stack_diff,
-            "merged_listings": listings,
-            "merged_history": history
         }
 
     @staticmethod
-    def _empty_metrics():
-        return {
-            "velocity": 0, "velocity_tx": 0, "avg_sale_price": 0, "avg_price_type": "None",
-            "min_price": 0, "profit": 0, "flip_profit": 0, "roi": 0, "arbitrage": 0, 
-            "arbitrage_warning": False, "sniping_profit": 0, "sniping_cost": 0,
-            "days_to_sell": 999, "stock_total": 0, "total_stock_raw": 0, "stack_diff": 0,
-            "merged_listings": [], "merged_history": []
-        }
+    def clean_market_data(data_list, min_price_threshold=300):
+        """
+        Filters out 'garbage' items from a list of market data objects.
+        Criteria:
+        1. Min Price < Threshold (e.g. 300 gil) -> likely trash/dye/junk
+        2. No Listings -> dead item
+        """
+        cleaned = []
+        for item_data in data_list:
+            listings = item_data.get("listings", [])
+            if not listings:
+                continue
+            
+            # Check Min Price
+            min_price = listings[0].get("pricePerUnit", 0)
+            if min_price < min_price_threshold:
+                continue
+                
+            cleaned.append(item_data)
+        return cleaned
 
     @staticmethod
     def clean_market_data(data_list, min_price_threshold=300):
