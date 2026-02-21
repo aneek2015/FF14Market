@@ -1086,12 +1086,12 @@ class FF14MarketApp(ctk.CTk):
                 
                 if self.is_loading: return
                 self.is_loading = True
-                threading.Thread(target=self.fetch_market_data, args=(iid,)).start()
+                threading.Thread(target=self.fetch_market_data, args=(iid,), daemon=True).start()
                 
                 # Sync to Crafting
                 if hasattr(self, 'lbl_craft_status'):
                      self.lbl_craft_status.configure(text=f"正同步搜尋配方: {iname}...", text_color="cyan")
-                threading.Thread(target=self._process_crafting_logic, args=(iid, iname)).start()
+                threading.Thread(target=self._process_crafting_logic, args=(iid, iname), daemon=True).start()
 
                 window.destroy()  # Optional: Close window on select
 
@@ -1230,14 +1230,14 @@ class FF14MarketApp(ctk.CTk):
             self.after(0, lambda: self.update_title(item_name, item_id))
             
             self.is_loading = True
-            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
+            threading.Thread(target=self.fetch_market_data, args=(item_id,), daemon=True).start()
             
             # Sync to Crafting
             if hasattr(self, 'lbl_craft_status'):
                 self.lbl_craft_status.configure(text=f"正同步搜尋配方: {item_name}...", text_color="cyan")
             
             # Trigger crafting calc in background
-            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
+            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name), daemon=True).start()
 
         for item_id, item_name in candidates:
             btn_text = f"{item_name}\n(ID: {item_id})"
@@ -1410,8 +1410,8 @@ class FF14MarketApp(ctk.CTk):
             logging.info(f"Refreshing data for item ID: {self.current_item_id}")
             self.status_bar.configure(text=f"正在刷新 {self.current_item_name} 的數據...", text_color="yellow")
             self.is_loading = True
-            threading.Thread(target=self.fetch_market_data, args=(self.current_item_id,)).start()
-            threading.Thread(target=self._process_crafting_logic, args=(self.current_item_id, self.current_item_name)).start()
+            threading.Thread(target=self.fetch_market_data, args=(self.current_item_id,), daemon=True).start()
+            threading.Thread(target=self._process_crafting_logic, args=(self.current_item_id, self.current_item_name), daemon=True).start()
             return
 
         raw_input = self.search_entry.get().strip()
@@ -1469,7 +1469,7 @@ class FF14MarketApp(ctk.CTk):
         
         self.prepare_loading_ui(clear_data=False)
         self.status_bar.configure(text="正在重新計算分析數據...", text_color="yellow")
-        threading.Thread(target=self._recalculate_process).start()
+        threading.Thread(target=self._recalculate_process, daemon=True).start()
 
     def _recalculate_process(self):
         time.sleep(0.3) 
@@ -2054,12 +2054,12 @@ class FF14MarketApp(ctk.CTk):
 
             self.status_bar.configure(text=f"正在載入 {display_name} ...", text_color="yellow")
 
-            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
+            threading.Thread(target=self.fetch_market_data, args=(item_id,), daemon=True).start()
 
             if hasattr(self, 'lbl_craft_status'):
                 self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
 
-            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
+            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name), daemon=True).start()
 
 # --- Hot Item Scanner (Tab) ---
     def setup_tab_scanner(self):
@@ -2395,12 +2395,12 @@ class FF14MarketApp(ctk.CTk):
             
             self.status_bar.configure(text=f"正在載入 {display_name} ...", text_color="yellow")
             
-            threading.Thread(target=self.fetch_market_data, args=(item_id,)).start()
+            threading.Thread(target=self.fetch_market_data, args=(item_id,), daemon=True).start()
             
             if hasattr(self, 'lbl_craft_status'):
                 self.lbl_craft_status.configure(text=f"正同步搜尋配方: {display_name}...", text_color="cyan")
             
-            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name)).start()
+            threading.Thread(target=self._process_crafting_logic, args=(item_id, item_name), daemon=True).start()
 
     # ========================================================
     # [P3] 價格警報系統

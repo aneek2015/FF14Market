@@ -9,15 +9,22 @@ class DatabaseManager:
         self.db_path = db_path
         self.init_db()
 
+    from contextlib import contextmanager
+
+    @contextmanager
     def get_connection(self):
-        """Creates and returns a new database connection."""
+        """Creates and returns a new database connection, automatically closing it on exit."""
         conn = sqlite3.connect(self.db_path)
         # Enable Write-Ahead Logging for better concurrency
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
         except Exception:
             pass
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def init_db(self):
         """Initializes database tables."""
