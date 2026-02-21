@@ -442,11 +442,6 @@ class FF14MarketApp(ctk.CTk):
                                                 text_color="#AAA")
         self.auto_refresh_cb.grid(row=5, column=0, padx=20, pady=(0, 5))
 
-        # [P4] 主題切換
-        self.theme_button = ctk.CTkButton(self.sidebar_frame, text="🎨 切換主題", command=self._toggle_theme, fg_color="transparent", border_width=1, text_color="silver", height=24)
-        self.theme_button.grid(row=16, column=0, padx=20, pady=(0, 10), sticky="s")
-
-
         self.help_button = ctk.CTkButton(self.sidebar_frame, text="使用說明 / Help", command=self.show_help_window, fg_color="transparent", border_width=1, text_color="silver")
         self.help_button.grid(row=14, column=0, padx=20, pady=(5, 5), sticky="s")
 
@@ -2614,19 +2609,6 @@ class FF14MarketApp(ctk.CTk):
             logging.info(f"[自動刷新] 刷新 {self.current_item_name}")
             self.start_search(use_current_id=True)
         self._schedule_auto_refresh()
-
-    # ========================================================
-    # [P4] 主題切換
-    # ========================================================
-    def _toggle_theme(self):
-        """深色/淺色主題切換"""
-        current = ctk.get_appearance_mode()
-        if current == "Dark":
-            ctk.set_appearance_mode("Light")
-            self.status_bar.configure(text="🎨 已切換為淺色主題")
-        else:
-            ctk.set_appearance_mode("Dark")
-            self.status_bar.configure(text="🎨 已切換為深色主題")
 
 if __name__ == "__main__":
     app = FF14MarketApp()
