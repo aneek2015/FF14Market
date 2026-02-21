@@ -18,6 +18,8 @@ echo Building Application (Folder Mode)...
 pyinstaller --noconfirm --onedir --windowed --clean ^
     --name "FF14MarketApp" ^
     --collect-all customtkinter ^
+    --collect-all matplotlib ^
+    --collect-all pkg_resources ^
     app.py
 
 echo.
@@ -28,6 +30,7 @@ copy "meta_items.json" "dist\FF14MarketApp\"
 copy "market_app.db" "dist\FF14MarketApp\"
 copy "使用說明.txt" "dist\FF14MarketApp\"
 copy "README.md" "dist\FF14MarketApp\"
+copy "update_items_cache.py" "dist\FF14MarketApp\"
 
 echo.
 echo.
