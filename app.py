@@ -1275,10 +1275,9 @@ class FF14MarketApp(ctk.CTk):
 
     def _run_search_task(self, query):
         """
-        [背景執行緒] 搜尋 Item + 同步檢查製作狀態
+        [背景執行緒] 搜尋 Item（兩階段：先顯示結果，再非同步填充製作狀態）
         """
         try:
-            # 由於 append_log 已經修復為 Thread-Safe，這裡可以放心使用 logging
             logging.info(f"開始多執行緒搜尋: {query}")
             
             # 嘗試解析是否為 ID
@@ -1287,15 +1286,13 @@ class FF14MarketApp(ctk.CTk):
                  name = self.db.get_item_name_by_id(item_id)
                  results = [{'id': item_id, 'name': name}] if name else []
                  if not results:
-                     # 嘗試透過 API 搜尋 ID
                       results = [{'id': c[0], 'name': c[1]} for c in self.api.search_item_web(query)]
             else:
                  # 關鍵字搜尋 (先本地後 API)
-                 local_res = self.db.search_local_items(query.split(), limit=50) # Split specifically for DB method
+                 local_res = self.db.search_local_items(query.split(), limit=50)
                  if local_res:
                      results = [{'id': r[0], 'name': r[1]} for r in local_res]
                  else:
-                     # Fallback to API
                      api_res = self.api.search_item_web(query)
                      results = [{'id': c[0], 'name': c[1]} for c in api_res]
 
@@ -1303,42 +1300,57 @@ class FF14MarketApp(ctk.CTk):
                 self.after(0, lambda: self._search_finished([], "找不到相關物品。"))
                 return
 
-            logging.info(f"搜尋找到 {len(results)} 筆結果, 開始分析製作狀態...")
+            logging.info(f"搜尋找到 {len(results)} 筆結果")
             
-            # 準備顯示資料
+            # === 第一階段：立即顯示結果（不含製作狀態） ===
             display_data = []
-            server = self.selected_dc
-            
             for item in results:
                 item_id = item.get('id')
                 item_name = item.get('name') or f"Unknown ({item_id})"
                 
-                # [Optimization] Cache name if new
                 if not self.db.get_item_name_by_id(item_id):
                     self.db.cache_item(item_id, item_name)
-
-                # 檢查製作狀態
-                crafting_info = self.crafting_service.get_crafting_data(item_id, server)
-                
-                craft_status = "❌ 無法製作"
-                if crafting_info.get('status') != 'no_recipe':
-                    craft_status = "🔨 可製作"
-                
-                price_info = "---"
 
                 display_data.append({
                     'id': item_id,
                     'name': item_name,
-                    'craft_status': craft_status,
-                    'price_info': price_info
+                    'craft_status': "⏳ 檢查中...",  # 預設顯示
+                    'price_info': "---"
                 })
             
-            # 將 UI 更新排程回主執行緒 (雖然在 _update_search_ui 裡面也是安全的，但這裡作為一個 Task 結束點)
-            self.after(0, lambda: self._update_search_ui(display_data))
+            # 先顯示搜尋結果
+            self.after(0, lambda d=display_data: self._update_search_ui(d))
+            
+            # === 第二階段：背景非同步填充製作狀態 ===
+            server = self.selected_dc
+            for i, item in enumerate(display_data):
+                try:
+                    crafting_info = self.crafting_service.get_crafting_data(item['id'], server)
+                    craft_status = "❌ 無法製作"
+                    if crafting_info.get('status') != 'no_recipe':
+                        craft_status = "🔨 可製作"
+                    
+                    # 在主執行緒更新對應的 TreeView 行
+                    self.after(0, lambda idx=i, s=craft_status: self._update_craft_status_cell(idx, s))
+                except Exception:
+                    pass  # 跳過失敗的項目
 
         except Exception as e:
             logging.error(f"搜尋執行緒錯誤: {e}")
             self.after(0, lambda: self._search_finished([], f"錯誤: {e}"))
+
+    def _update_craft_status_cell(self, row_index, craft_status):
+        """[主執行緒] 更新 TreeView 中指定行的製作狀態欄位"""
+        try:
+            children = self.scan_tree.get_children()
+            if row_index < len(children):
+                iid = children[row_index]
+                current_values = list(self.scan_tree.item(iid, 'values'))
+                if len(current_values) >= 3:
+                    current_values[2] = craft_status  # 第3欄 = 製作狀態
+                    self.scan_tree.item(iid, values=current_values)
+        except Exception:
+            pass
 
     def _update_search_ui(self, display_data):
         """
