@@ -21,7 +21,6 @@ echo Building Application (Folder Mode)...
 pyinstaller --noconfirm --onedir --windowed --clean ^
     --name "FF14MarketApp" ^
     --icon="icon.jpg" ^
-    --splash="start.jpg" ^
     --collect-all customtkinter ^
     --collect-all matplotlib ^
     --collect-all pkg_resources ^

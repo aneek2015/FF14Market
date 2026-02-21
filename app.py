@@ -2612,9 +2612,4 @@ class FF14MarketApp(ctk.CTk):
 
 if __name__ == "__main__":
     app = FF14MarketApp()
-    try:
-        import pyi_splash
-        pyi_splash.close()
-    except ImportError:
-        pass
     app.mainloop()
